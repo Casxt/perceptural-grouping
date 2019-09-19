@@ -44,6 +44,7 @@ for epoch in range(epochs):
             loss.backward()
             optimizer.step()
             writer.add_scalar("loss", loss.detach().cpu().numpy()[0] / batchSize, step)
+            writer.add_image("tarin_image", anss[-1][0], step)
             print(
                 f"epoch{epoch}    step{index}   samples {index}/{len(train.dataset)}" +
                 f"    spend{(time.time() - t) / batchSize}s    loss{loss.detach().cpu().numpy()[0] / batchSize}")
