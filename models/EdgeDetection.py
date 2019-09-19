@@ -50,7 +50,7 @@ class EdgeDetection(torch.nn.Module):
             outputs.append(torch.sigmoid(output))
 
         fuse = self.fuse_conv(torch.cat(outputs, 1))
-        outputs.append(fuse)
+        outputs.append(torch.sigmoid(fuse))
         return outputs
 
     def get_hook(self, layer):
@@ -74,20 +74,19 @@ class EdgeDetection(torch.nn.Module):
 
     @staticmethod
     def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
-        log_p = input.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
-        target_t = target.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
+        # log_p = input.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
+        # target_t = target.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
 
         # 正负样本统计
-        pos_index = (target_t > 0)
-        neg_index = (target_t == 0)
+        pos_index = (target > 0)
+        neg_index = (target == 0)
 
-        pos_num = pos_index.sum()
-        neg_num = neg_index.sum()
+        pos_num = pos_index.sum().type(torch.float)
+        neg_num = neg_index.sum().type(torch.float)
         sum_num = pos_num + neg_num
 
         # 计算每个样本点的损失权重
-        weight = torch.tensor(target_t.size()).cuda()
-
-        weight[pos_index] = neg_num * 1.0 / sum_num
-        weight[neg_index] = pos_num * 1.0 / sum_num
-        return nn.functional.binary_cross_entropy(log_p, target_t, weight, size_average=True)
+        weight = torch.empty(target.size()).cuda()
+        weight[pos_index] = neg_num / sum_num
+        weight[neg_index] = pos_num / sum_num
+        return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')

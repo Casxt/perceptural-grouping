@@ -5,7 +5,7 @@ import scipy
 import numpy as np
 from pathlib import Path
 
-import torch
+import scipy.io as sio
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
@@ -25,17 +25,17 @@ class BSDS500:
     def get_train(self):
         gts = map(lambda name: (Path(self.groundTruthPath, "train", f"{name}.mat")), self.trainList)
         imgs = map(lambda name: (Path(self.imagePath, "train", f"{name}.jpg")), self.trainList)
-        return BSDS500Dataset(list(gts), list(imgs))
+        return BSDS500Dataset(list(imgs), list(gts))
 
     def get_test(self):
         gts = map(lambda name: (Path(self.groundTruthPath, "test", f"{name}.mat")), self.testList)
         imgs = map(lambda name: (Path(self.imagePath, "test", f"{name}.jpg")), self.testList)
-        return BSDS500Dataset(list(gts), list(imgs))
+        return BSDS500Dataset(list(imgs), list(gts))
 
     def get_val(self):
         gts = map(lambda name: (Path(self.groundTruthPath, "val", f"{name}.mat")), self.valList)
         imgs = map(lambda name: (Path(self.imagePath, "val", f"{name}.jpg")), self.valList)
-        return BSDS500Dataset(list(gts), list(imgs))
+        return BSDS500Dataset(list(imgs), list(gts))
 
     def shuffle(self):
         random.shuffle(self.trainList)
@@ -48,7 +48,7 @@ class BSDS500Dataset(Dataset):
     # mean = [0.485, 0.456, 0.406]
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     targetTransform = transforms.Compose([
         transforms.ToTensor()
@@ -60,7 +60,7 @@ class BSDS500Dataset(Dataset):
 
     @staticmethod
     def _load_ground_truth(path: Path):
-        data = scipy.io.loadmat(path)
+        data = sio.loadmat(path)
         # init boundary to groundTruth shape
         boundary = np.zeros(data["groundTruth"][0, 0]["Boundaries"][0, 0].shape)
         # add all boundary
@@ -68,7 +68,7 @@ class BSDS500Dataset(Dataset):
             boundary += groundTruth["Boundaries"][0, 0]
         # get mean boundary
         boundary /= len(data["groundTruth"][0])
-        return boundary
+        return boundary.astype("float32")
 
     @staticmethod
     def _load_image(path: Path):
@@ -78,6 +78,6 @@ class BSDS500Dataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
-        gt = BSDS500Dataset._load_ground_truth(self.groundTruth[index])
-        image = BSDS500Dataset._load_image(self.data[index])
-        return self.transform(image), self.targetTransform(gt)
+        gt = self.targetTransform(BSDS500Dataset._load_ground_truth(self.groundTruth[index]))
+        image = self.transform(BSDS500Dataset._load_image(self.data[index]))
+        return image, gt
