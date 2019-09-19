@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from torchvision.models.vgg import vgg16
-import torch.nn.functional as F
 from typing import List
 
 
@@ -37,7 +36,6 @@ class EdgeDetection(torch.nn.Module):
         self.vgg_output_convs: List[torch.Conv2d] = [self.vgg_output_conv0, self.vgg_output_conv1,
                                                      self.vgg_output_conv2, self.vgg_output_conv3,
                                                      self.vgg_output_conv4]
-
         self._initialize_weights()
 
     def forward(self, x):
@@ -48,7 +46,7 @@ class EdgeDetection(torch.nn.Module):
         # process vgg_output one by one
         for i, output in enumerate(self.vgg_output):
             output = self.vgg_output_convs[i](output)
-            output = F.interpolate(output, size=size)
+            output = nn.functional.interpolate(output, size=size)
             outputs.append(torch.sigmoid(output))
 
         fuse = self.fuse_conv(torch.cat(outputs, 1))
@@ -73,3 +71,23 @@ class EdgeDetection(torch.nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
+
+    @staticmethod
+    def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
+        log_p = input.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
+        target_t = target.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
+
+        # 正负样本统计
+        pos_index = (target_t > 0)
+        neg_index = (target_t == 0)
+
+        pos_num = pos_index.sum()
+        neg_num = neg_index.sum()
+        sum_num = pos_num + neg_num
+
+        # 计算每个样本点的损失权重
+        weight = torch.tensor(target_t.size()).cuda()
+
+        weight[pos_index] = neg_num * 1.0 / sum_num
+        weight[neg_index] = pos_num * 1.0 / sum_num
+        return nn.functional.binary_cross_entropy(log_p, target_t, weight, size_average=True)
