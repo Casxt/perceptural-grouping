@@ -1,7 +1,7 @@
 import os
 import random
 
-import scipy
+import torch
 import numpy as np
 from pathlib import Path
 
@@ -18,9 +18,11 @@ class BSDS500:
         self.groundTruthPath = Path(dataSetPath, "data", "groundTruth")
         self.imagePath = Path(dataSetPath, "data", "images")
         # lambda x: x[0:-4] remove .mat in file name
-        self.trainList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "train"))))
-        self.testList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "test"))))
-        self.valList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "val"))))
+        self.trainList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "train")))).sort()
+        self.testList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "test")))).sort()
+        self.valList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "val")))).sort()
+
+        # move 50 from val to train, move 150 from test to train
 
     def get_train(self):
         gts = map(lambda name: (Path(self.groundTruthPath, "train", f"{name}.mat")), self.trainList)
@@ -54,6 +56,10 @@ class BSDS500Dataset(Dataset):
         transforms.ToTensor()
     ])
 
+    randomTransform = transforms.Compose([
+        transforms.RandomHorizontalFlip()
+    ])
+
     def __init__(self, data: list, groundTruth: list):
         self.data = data
         self.groundTruth = groundTruth
@@ -80,4 +86,7 @@ class BSDS500Dataset(Dataset):
     def __getitem__(self, index):
         gt = self.targetTransform(BSDS500Dataset._load_ground_truth(self.groundTruth[index]))
         image = self.transform(BSDS500Dataset._load_image(self.data[index]))
-        return image, gt
+        t = torch.cat((image, gt), 0)
+        t = t.flip(2) if random.random() < 0.5 else t
+        return t[:3], t[3:]
+        # return image, gt
