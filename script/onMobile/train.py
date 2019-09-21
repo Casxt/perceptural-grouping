@@ -1,49 +1,48 @@
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
-from PIL import Image
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from BSDS500 import BSDS500
-from models import EdgeDetection
+from tool.BSDS500 import BSDS500
+from models import EdgeDetectionOnMobile
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 #
-epochs = 2000
+epochs = 1000
 batchSize = 16
 # no_pretrain_lr0001 no_pretrain_lr1
 # pretrain_lr0001
-subPath = Path("pretrain_mobileblock_lr0001")
-save = Path("/root/perceptual_grouping/vgg/weight/", subPath)
+subPath = Path("mobile/pretrain_lr01_normal_conv_tarin_all")
+save = Path("/root/perceptual_grouping/weight/", subPath)
 
-save.mkdir() if not save.exists() else None
+save.mkdir(parents=True) if not save.exists() else None
 
-writer = SummaryWriter(Path("/root/perceptual_grouping/vgg/log/", subPath))
+writer = SummaryWriter(Path("/root/perceptual_grouping/log/", subPath))
 
 dataSet = BSDS500(Path("/root/perceptual_grouping/dataset/BSDS500"))
 
-net: torch.nn.Module = EdgeDetection().cuda()
-
+net: torch.nn.Module = EdgeDetectionOnMobile()
+net.cuda()
 # define the optimizer
+mobile_params = net.mobile_net_v2.parameters()
+our_params = filter(lambda p: p not in mobile_params, net.parameters())
+print(mobile_params, our_params)
 optimizer = torch.optim.RMSprop([
-    {'params': net.fuse_conv.parameters()},
-    {'params': net.vgg_output_conv0.parameters()},
-    {'params': net.vgg_output_conv1.parameters()},
-    {'params': net.vgg_output_conv2.parameters()},
-    {'params': net.vgg_output_conv3.parameters()},
-    {'params': net.vgg_output_conv4.parameters()}], lr=1e-3)
-
+    {"params": net.parameters(), "lr": 1e-2},
+    # {"params": mobile_params, "lr": 0},
+], lr=1e-2)
 scheduler = ReduceLROnPlateau(optimizer)
 
 step = 0
 for epoch in range(epochs):
+
+    if epoch == 20:
+        for p in optimizer.param_groups:
+            p['lr'] = 1e-2
+
     net.train()
     loss = torch.tensor([0.]).cuda()
-
-    if epoch == 200:
-        optimizer = torch.optim.RMSprop(net.parameters(), lr=1e-5)
-
 
     # 传入图像大小不同，只能一张一张训练
     train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=True, batch_size=1)
@@ -53,7 +52,7 @@ for epoch in range(epochs):
         imgs, gts = imgs.cuda(), gts.cuda()
         anss = net(imgs)
         # for i, ans in enumerate(anss):
-        loss += EdgeDetection.binary_cross_entropy_loss(anss, gts)
+        loss += EdgeDetectionOnMobile.binary_cross_entropy_loss(anss, gts)
 
         if index != 0 and index % batchSize == 0:
             writer.add_scalar("loss", loss.detach().cpu().numpy()[0] / batchSize, step)
@@ -64,6 +63,7 @@ for epoch in range(epochs):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            scheduler.step(loss)
             loss = torch.tensor([0.]).cuda()
         step += 1
 
@@ -76,7 +76,7 @@ for epoch in range(epochs):
         imgs, gts = imgs.cuda(), gts.cuda()
         anss = net(imgs)
         # for i, ans in enumerate(anss):
-        loss += EdgeDetection.binary_cross_entropy_loss(anss, gts).detach()
+        loss += EdgeDetectionOnMobile.binary_cross_entropy_loss(anss, gts).detach()
 
     valLoss = loss.detach().cpu().numpy()[0] / len(val)
     print(f"epoch{epoch} val loss{valLoss}")

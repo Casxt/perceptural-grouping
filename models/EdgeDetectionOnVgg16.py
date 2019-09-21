@@ -26,7 +26,7 @@ class EdgeDetection(torch.nn.Module):
 
         # use process vgg output and raw c,h,w input
         self.fuse_conv = nn.Sequential(
-            nn.Conv2d(len(self.vgg_output) * 32 + 3, 256, 1),
+            nn.Conv2d(len(self.vgg_output) * 1 + 3, 256, 1),
             nn.Conv2d(256, 256, 3, groups=256, padding=1),
             nn.ReLU6(inplace=True),
             nn.Conv2d(256, 1, 1),
@@ -37,42 +37,42 @@ class EdgeDetection(torch.nn.Module):
             nn.ReLU6(inplace=True),
             nn.Conv2d(128, 128, 3, groups=128, padding=1),
             nn.ReLU6(inplace=True),
-            nn.Conv2d(128, 32, 1))
+            nn.Conv2d(128, 1, 1))
 
         self.vgg_output_conv1 = nn.Sequential(
             nn.Conv2d(128, 256, 1),
             nn.ReLU6(inplace=True),
             nn.Conv2d(256, 256, 3, groups=256, padding=1),
             nn.ReLU6(inplace=True),
-            nn.Conv2d(256, 32, 1))
+            nn.Conv2d(256, 1, 1))
 
         self.vgg_output_conv2 = nn.Sequential(
             nn.Conv2d(256, 256, 1),
             nn.ReLU6(inplace=True),
             nn.Conv2d(256, 256, 3, groups=256, padding=1),
             nn.ReLU6(inplace=True),
-            nn.Conv2d(256, 32, 1))
+            nn.Conv2d(256, 1, 1))
 
         self.vgg_output_conv3 = nn.Sequential(
             nn.Conv2d(512, 256, 1),
             nn.Conv2d(256, 256, 3, groups=256, padding=1),
             nn.ReLU6(inplace=True),
-            nn.Conv2d(256, 32, 1))
+            nn.Conv2d(256, 1, 1))
 
         self.vgg_output_conv4 = nn.Sequential(
             nn.Conv2d(512, 256, 1),
             nn.Conv2d(256, 256, 3, groups=256, padding=1),
             nn.ReLU6(inplace=True),
-            nn.Conv2d(256, 32, 1))
+            nn.Conv2d(256, 1, 1))
 
         # save vgg_output_conv to list
         self.vgg_output_convs: List[torch.Conv2d] = [self.vgg_output_conv0, self.vgg_output_conv1,
                                                      self.vgg_output_conv2, self.vgg_output_conv3,
                                                      self.vgg_output_conv4]
-        self._initialize_weights()
+        self._initialize_weights(self.fuse_conv, *self.vgg_output_convs)
 
-    def forward(self, x):
-        outputs: list[torch.Tensor] = [x]
+    def forward(self, x) -> List:
+        outputs: list[torch.Tensor] = []
         size = x.size()[2:4]
         self.vgg16(x)  # run vgg and trigger hook
 
@@ -82,9 +82,10 @@ class EdgeDetection(torch.nn.Module):
             output = nn.functional.interpolate(output, size=size, mode="bilinear")
             outputs.append(torch.sigmoid(output))
 
-        fuse = self.fuse_conv(torch.cat(outputs, 1))
+        fuse = self.fuse_conv(torch.cat([x, *outputs], 1))
+        outputs.append(torch.sigmoid(fuse))
         # outputs.append(torch.sigmoid(fuse))
-        return torch.sigmoid(fuse)
+        return outputs
 
     def get_hook(self, layer):
         def hook(module, input_tensor, output_tensor):
@@ -92,18 +93,19 @@ class EdgeDetection(torch.nn.Module):
 
         return hook
 
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
+    def _initialize_weights(self, *parts):
+        for part in parts:
+            for m in part.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
+                elif isinstance(m, nn.BatchNorm2d):
+                    nn.init.constant_(m.weight, 1)
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
+                elif isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, 0, 0.01)
+                    nn.init.constant_(m.bias, 0)
 
     @staticmethod
     def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):

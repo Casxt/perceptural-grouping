@@ -9,20 +9,21 @@ import scipy.io as sio
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import transforms
+from typing import List
 
-
-class BSDS500:
+class BSDS500(object):
 
     def __init__(self, dataSetPath: Path):
         self.dataSetPath = dataSetPath
         self.groundTruthPath = Path(dataSetPath, "data", "groundTruth")
         self.imagePath = Path(dataSetPath, "data", "images")
         # lambda x: x[0:-4] remove .mat in file name
-        self.trainList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "train")))).sort()
-        self.testList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "test")))).sort()
-        self.valList = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "val")))).sort()
-
-        # move 50 from val to train, move 150 from test to train
+        self.trainList: List[str] = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "train"))))
+        self.testList: List[str] = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "test"))))
+        self.valList: List[str] = list(map(lambda x: x[0:-4], os.listdir(Path(self.groundTruthPath, "val"))))
+        # self.trainList.sort()
+        # self.testList.sort()
+        # self.valList.sort()
 
     def get_train(self):
         gts = map(lambda name: (Path(self.groundTruthPath, "train", f"{name}.mat")), self.trainList)
