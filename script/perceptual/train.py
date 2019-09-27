@@ -53,9 +53,7 @@ for epoch in range(epochs):
     if epoch == 20:
         for p in optimizer.param_groups:
             p["lr"] = 1e-3
-    elif epoch == 40:
-        for p in optimizer.param_groups:
-            p["lr"] = 1e-4
+
     # 传入图像大小不同，只能一张一张训练
     train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=True, batch_size=1)
     for index, batch in enumerate(train):
