@@ -19,7 +19,7 @@ epochs = 2000
 batchSize = 8
 # no_pretrain_lr0001 no_pretrain_lr1
 # pretrain_lr0001
-subPath = Path("pretrain_vgg_perceptua4b_lr01_fuse3")
+subPath = Path("pretrain_vgg_perceptua4b_lr01_fuse3_2")
 save = Path("/root/perceptual_grouping/weight/perceptual/", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 
@@ -50,10 +50,12 @@ for epoch in range(epochs):
     net.train()
     loss = [torch.tensor([0.]).cuda()] * 6
 
-    if epoch == 20:
+    if epoch == 50:
         for p in optimizer.param_groups:
             p["lr"] = 1e-3
-
+    if epoch == 70:
+        for p in optimizer.param_groups:
+            p["lr"] = 1e-4
     # 传入图像大小不同，只能一张一张训练
     train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=True, batch_size=1)
     for index, batch in enumerate(train):
