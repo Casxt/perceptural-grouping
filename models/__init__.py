@@ -1,4 +1,6 @@
 from .EdgeDetectionOnVgg16 import EdgeDetection as EdgeDetectionOnVgg16
+from .EdgeDetectionOnVgg16V2 import EdgeDetection as EdgeDetectionOnVgg16V2
+
 from .EdgeDetectionOnMobile import EdgeDetection as EdgeDetectionOnMobile
 from .PerceptualEdgeDetection import PerceptualEdgeDetection
 from .PerceptualEdgeDetectionV2 import PerceptualEdgeDetection as  PerceptualEdgeDetectionV2

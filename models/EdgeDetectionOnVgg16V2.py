@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torchvision.models.vgg import vgg16
-from typing import List
+from typing import List, Tuple
 
 
 # v2 将register_forward_hook修改为原结构直出
@@ -78,7 +78,7 @@ class EdgeDetection(torch.nn.Module):
                                                self.vgg16_b4]
         self._initialize_weights(self.fuse_conv, *self.vgg_output_convs)
 
-    def forward(self, x) -> List:
+    def forward(self, x) -> Tuple:
         outputs: list[torch.Tensor] = []
         size = x.size()[2:4]
         vgg_output0 = self.vgg16_b0(x)
@@ -94,7 +94,7 @@ class EdgeDetection(torch.nn.Module):
 
         fuse = self.fuse_conv(torch.cat([x, *outputs], 1))
         outputs.append(torch.sigmoid(fuse))
-        return outputs
+        return tuple(outputs)
 
     def _initialize_weights(self, *parts):
         for part in parts:

@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 # import tool
 from tool.CitySpeace import CitySpace
-from models import EdgeDetectionOnVgg16 as EdgeDetection
+from models import EdgeDetectionOnVgg16V2 as EdgeDetection
 
 # cityspace 数据集， 一切默认
 
@@ -28,7 +28,11 @@ net: torch.nn.Module = EdgeDetection().cuda()
 
 # define the optimizer
 optimizer = torch.optim.RMSprop([
-    {'params': net.vgg16.parameters(), "lr": 0},
+    {'params': net.vgg16_b0.parameters(), "lr": 0},
+    {'params': net.vgg16_b1.parameters(), "lr": 0},
+    {'params': net.vgg16_b2.parameters(), "lr": 0},
+    {'params': net.vgg16_b3.parameters(), "lr": 0},
+    {'params': net.vgg16_b4.parameters(), "lr": 0},
     {'params': net.fuse_conv.parameters()},
     {'params': net.vgg_output_conv0.parameters()},
     {'params': net.vgg_output_conv1.parameters()},
@@ -36,7 +40,7 @@ optimizer = torch.optim.RMSprop([
     {'params': net.vgg_output_conv3.parameters()},
     {'params': net.vgg_output_conv4.parameters()}], lr=1e-3)
 
-# scheduler = ReduceLROnPlateau(optimizer)
+writer.add_graph(net, torch.zeros(1, 3, 836, 2035).cuda(), True)
 
 step = 0
 for epoch in range(epochs):
@@ -46,8 +50,8 @@ for epoch in range(epochs):
     if epoch == 20:
         for p in optimizer.param_groups:
             p["lr"] = 1e-4
-    # 传入图像大小不同，只能一张一张训练
-    train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=True, batch_size=1)
+
+    train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=True, batch_size=16)
     for index, batch in enumerate(train):
         t = time.time()
         imgs, gts, edge = batch
@@ -55,24 +59,24 @@ for epoch in range(epochs):
         anss = net(imgs)
         for i, ans in enumerate(anss):
             loss += EdgeDetection.binary_cross_entropy_loss(ans, edge)
-
-        if index != 0 and index % batchSize == 0:
-            writer.add_scalar("tarin_loss", loss.detach().cpu().numpy()[0] / batchSize, step)
-            writer.add_image("tarin_image", anss[-1][0], step)
-            print(
-                f"epoch{epoch}    step{index}   samples {index}/{len(train.dataset)}" +
-                f"    spend{(time.time() - t) / batchSize}s    loss{loss.detach().cpu().numpy()[0] / batchSize}")
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            # torch.cuda.empty_cache()
-            loss = torch.tensor([0.]).cuda()
+        # TODO loss 需要相加？
+        # if index != 0 and index % batchSize == 0:
+        writer.add_scalar("tarin_loss", loss.detach().cpu().numpy()[0] / batchSize, step)
+        writer.add_image("tarin_image", anss[-1][0], step)
+        print(
+            f"epoch{epoch}    step{index}   samples {index}/{len(train.dataset)}" +
+            f"    spend{(time.time() - t) / batchSize}s    loss{loss.detach().cpu().numpy()[0] / batchSize}")
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        # torch.cuda.empty_cache()
+        loss = torch.tensor([0.]).cuda()
         step += 1
 
     net.eval()
     loss = torch.tensor([0.], requires_grad=False).cuda()
     anss, gts = None, None
-    val = DataLoader(dataSet.get_val(), shuffle=False, pin_memory=True, batch_size=1)
+    val = DataLoader(dataSet.get_val(), shuffle=False, pin_memory=True, batch_size=4)
     for index, batch in enumerate(val):
         imgs, gts = batch
         imgs, gts = imgs.cuda(), gts.cuda()
