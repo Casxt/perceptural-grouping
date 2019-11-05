@@ -17,8 +17,8 @@ from models import EdgeDetectionOnMobileV2 as EdgeDetection
 device = 0
 epochs = 2000
 batchSize = 16
-workernum = 16
-subPath = Path("mobilenetv2/plain_2")
+workernum = 12
+subPath = Path("mobilenetv2/plain_4")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 
@@ -83,12 +83,12 @@ for epoch in range(epochs):
     with torch.no_grad():
         net.eval()
         losses = [torch.tensor([0.]).cuda(device)] * 6
-        step_losses = [torch.tensor([0.]).cuda(device)] * 6
         anss, gts, edges = None, None, None
         val = DataLoader(dataSet.get_val(), shuffle=False, pin_memory=False, num_workers=workernum,
                          batch_size=batchSize)
         total_time = 0
         for index, batch in enumerate(val):
+            step_losses = [torch.tensor([0.]).cuda(device)] * 6
             imgs, gts, edges = to_device(device, *batch)
 
             start_time = time.time()

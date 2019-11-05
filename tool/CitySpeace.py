@@ -98,11 +98,17 @@ class CitySpaceDataset(Dataset):
             index = (gt == num) + 0.
             sobelx = cv2.Sobel(index, cv2.CV_64F, 1, 0)
             sobely = cv2.Sobel(index, cv2.CV_64F, 0, 1)
-            sobelx = np.uint8(np.absolute(sobelx))
-            sobely = np.uint8(np.absolute(sobely))
-            sobelcombine = cv2.bitwise_or(sobelx, sobely)
+            absX = cv2.convertScaleAbs(sobelx)  # 转回uint8
+            absY = cv2.convertScaleAbs(sobely)
+            sobelcombine = cv2.addWeighted(absX, 0.5, absY, 0.5, 0)
             edge += sobelcombine
-        return edge / edge.max()
+
+        too_large = edge > 255
+        too_small = edge < 0
+        edge[too_large] = 255
+        edge[too_small] = 0
+
+        return edge / (edge.max() + 1e-7)
 
     def __len__(self):
         return len(self.data)
