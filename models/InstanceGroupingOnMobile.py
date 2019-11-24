@@ -61,11 +61,11 @@ class EdgeDetection(torch.nn.Module):
             nn.Conv2d(6, 24, 1, bias=False),
             InvertedResidual(24, 24, 1, 2),
             # 600 * 800
-            torch.nn.Conv2d(24, 32, 3, stride=2, padding=1),
+            nn.Conv2d(24, 32, 3, stride=2, padding=1),
             # 300 * 400
-            torch.nn.Conv2d(32, 48, 3, stride=2, padding=1),
+            nn.Conv2d(32, 48, 3, stride=2, padding=1),
             # 150 * 200
-            torch.nn.Conv2d(48, 64, 3, stride=2, padding=1),
+            nn.Conv2d(48, 64, 3, stride=2, padding=1),
             # 64 * 75 * 100
             nn.BatchNorm2d(64),
             nn.ReLU6(inplace=True),
@@ -77,7 +77,7 @@ class EdgeDetection(torch.nn.Module):
             InvertedResidual(64, 64, 1, 2),
             nn.Conv2d(64, 32, 1),
             nn.Conv2d(32, 3, 1),
-            # if_contain_edge, y, x
+            # 3 * 75 * 100
         )
 
         self._initialize_weights(self.fuse_conv, *self.mobile_outputs_convs)
@@ -126,6 +126,8 @@ class EdgeDetection(torch.nn.Module):
         # 区块预测网络
         edge_region_predict = torch.sigmoid(self.edge_region_predict(edge_region_feature))
 
+        torch.sort()
+
         # 区块特征图转节点特征, 使用先行后列的遍历方式, 将64个通道的数据作为特征
         # edge_region_feature 64 * 75 * 100 -> backend_node_feature 7500 * 64
         block_node_feature = torch.cat(
@@ -136,8 +138,6 @@ class EdgeDetection(torch.nn.Module):
 
         # 将边缘网络和区块网络的特征拼接
         node_feature = torch.cat((backend_node_feature, block_node_feature), 2)
-
-
 
         return (*edge_outputs, edge_region_predict)
 
