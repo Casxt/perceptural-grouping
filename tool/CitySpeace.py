@@ -116,6 +116,7 @@ class CitySpaceDataset(Dataset):
     def __getitem__(self, index):
         seed = np.random.randint(2147483647)  # make a seed with numpy generator
 
+        # 固定 seed 保证image 和
         random.seed(seed)  # apply this seed to img tranfsorms
         gt: torch.Tensor = self.targetTransform(Image.open(self.groundTruth[index]))
 
