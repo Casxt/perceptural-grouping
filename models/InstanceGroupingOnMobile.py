@@ -80,7 +80,17 @@ class EdgeDetection(torch.nn.Module):
             # 3 * 75 * 100
         )
 
-        self._initialize_weights(self.fuse_conv, *self.mobile_outputs_convs)
+        # GCN处理, 内部包含init, 不需要显示init
+        self.node_feature_grouping = nn.Sequential(
+            # 2000, 64 + 64 * 8 * 8 = 4160
+            GraphConvolution(2000, 4160, 1024),
+            GraphConvolution(2000, 1024, 1024),
+            GraphConvolution(2000, 1024, 256),
+            # 2000, 256
+        )
+
+        self._initialize_weights(self.fuse_conv, *self.mobile_outputs_convs, self.edge_region_feature,
+                                 self.edge_region_predict)
 
     def forward(self, x):
         # b,c,h,w
@@ -112,34 +122,49 @@ class EdgeDetection(torch.nn.Module):
         feature_map_list.append(edge_fuse_output)
         feature_map = torch.cat(feature_map_list, 1)  # 64 * 600 * 800
 
-        # 区块特征
-        edge_region_feature = self.edge_region_feature(feature_map)  #
+        # 区块特征 b, 64, 75, 100
+        edge_region_feature = self.edge_region_feature(feature_map)
 
         # 边缘特征图转节点特征, 使用先行后列的遍历方式, 将64个通道上每8*8大小区块的数据展平作为特征
         # feature_map 64 * 600 * 800 -> backend_node_feature 7500 * (64 * 8 * 8)
+        block_size = 8
         backend_node_feature = torch.cat(
-            tuple(feature_map[:, :, y:y + 8, x:x + 8]
-                  .reshape(feature_map.shape[0], 1, feature_map.shape[1] * 8 * 8)
-                  for x in range(0, 800, 8) for y in range(0, 600, 8)),
+            tuple(feature_map[:, :, y:y + block_size, x:x + block_size]
+                  .reshape(feature_map.shape[0], 1, feature_map.shape[1] * block_size * block_size)
+                  for x in range(0, 800, block_size) for y in range(0, 600, block_size)),
             1)  # b, n, f
 
-        # 区块预测网络
+        # 区块预测网络, b, 3 * 75 * 100
         edge_region_predict = torch.sigmoid(self.edge_region_predict(edge_region_feature))
-
-        torch.sort()
 
         # 区块特征图转节点特征, 使用先行后列的遍历方式, 将64个通道的数据作为特征
         # edge_region_feature 64 * 75 * 100 -> backend_node_feature 7500 * 64
-        block_node_feature = torch.cat(
+        # edge_region_predict_and_feature = torch.cat((edge_region_predict, edge_region_feature), dim=1)
+        block_feature = torch.cat(
             tuple(edge_region_feature[:, :, y, x]
                   .reshape(edge_region_feature.shape[0], 1, edge_region_feature.shape[1])
                   for x in range(0, 100) for y in range(0, 75)),
             1)  # b, n, f
 
         # 将边缘网络和区块网络的特征拼接
-        node_feature = torch.cat((backend_node_feature, block_node_feature), 2)
+        node_feature = torch.cat((block_feature, backend_node_feature), 2)
 
-        return (*edge_outputs, edge_region_predict)
+        # 获得topk的节点id, topk_index (batch, node)
+        _topk, topk_index = torch.topk(
+            edge_region_predict[:, 0, :, :].reshape(edge_region_predict.shape[0], -1), k=2000)
+        # 对节点index进行排序
+        sorted_topk_index, _topk_index_index = topk_index.sort(dim=1)
+
+        # 取出node map
+        node_map = torch.cat(
+            tuple(node_feature[batch, indices, :].unsqueeze(0) for batch, indices in enumerate(sorted_topk_index)),
+            0)
+        # 创建邻接图
+        adjacent_map = self.generate_adjacent_map(sorted_topk_index, edge_region_predict.shape[3])
+        node_output_feature = self.node_feature_grouping(
+            torch.cat((node_map.unsqueeze(0), adjacent_map.unsqueeze(0)), 0))
+
+        return (*edge_outputs, edge_region_predict, node_output_feature)
 
     @staticmethod
     def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
@@ -184,6 +209,36 @@ class EdgeDetection(torch.nn.Module):
                 elif isinstance(m, nn.Linear):
                     nn.init.normal_(m.weight, 0, 0.01)
                     nn.init.constant_(m.bias, 0)
+
+    def generate_adjacent_map(self, sorted_topk_index: torch.Tensor, feature_map_width):
+        # 距离矩阵 兼 邻接矩阵
+        adjacent_map = (torch.zeros(sorted_topk_index.shape[0],
+                                    sorted_topk_index.shape[1],
+                                    sorted_topk_index.shape[1],
+                                    requires_grad=False)
+                        .to(sorted_topk_index.device))
+        # 行坐标y
+        row = (sorted_topk_index / feature_map_width).floor()
+        # 列坐标x
+        col = (sorted_topk_index % feature_map_width)
+
+        # 生成表示点间距离的对称矩阵
+        for i in range(1, adjacent_map.shape[2]):
+            adjacent_map[:, i - 1, i:5] = adjacent_map[:, i:5, i - 1] = (
+                    (row[:, i:5] - row[:, i - 1:i]) ** 2 +
+                    (col[:, i:5] - col[:, i - 1:i]) ** 2
+            )
+        # 4格对角线长5.656, 3格对角线长4.242, 同时将0-5的范围留空
+        adjacent_map[adjacent_map < 5 ** 2] = 0
+        # 10格对角线长14.14121, 同时将1-14.5的范围留空
+        adjacent_map[adjacent_map < 14.5 ** 2] = 0.5
+        # 15格对角线长21.2132, 同时将1-21.5的范围留空
+        adjacent_map[adjacent_map < 21.5 ** 2] = 0.8
+        # 其他
+        adjacent_map[adjacent_map >= 21 ** 2] = 1.
+        # 翻转, 使距离为0的点权重为1, 以此类推
+        adjacent_map = (adjacent_map - 1) * -1
+        return adjacent_map
 
 
 class ConvBNReLU(nn.Sequential):
@@ -232,3 +287,45 @@ class InvertedResidual(nn.Module):
             return x + self.conv(x)
         else:
             return self.conv(x)
+
+
+class GraphConvolution(nn.Module):
+
+    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float64):
+        super().__init__()
+        # shapes
+        self.graph_num = node_num
+        self.input_feature_num = input_feature_num
+        self.output_feature_num = output_feature_num
+        self.add_bias = add_bias
+
+        # params
+        self.weight = nn.Parameter(torch.tensor(input_feature_num, self.output_feature_num, dtype=dtype))
+        self.bias = nn.Parameter(torch.tensor(self.graph_num, self.output_feature_num, dtype=dtype))
+
+        # init params
+        self.params_reset()
+
+    def params_reset(self):
+        nn.init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.merge, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.bias, 0)
+
+    def set_trainable(self, train=True):
+        for param in self.parameters():
+            param.requires_grad = train
+
+    def forward(self, input):
+        """
+        :param node_feature: (batch, graph_num, in_feature_num)
+        :param adjacent: (batch, graph_num, graph_num)
+        :return:
+        """
+        node_feature, adjacent = input
+        x = torch.matmul(adjacent, node_feature)
+        x = torch.matmul(x, self.weight)
+        if self.add_bias:
+            x = x + self.bias
+        if self.input_feature_num == self.output_feature_num:
+            x = x + node_feature
+        return x
