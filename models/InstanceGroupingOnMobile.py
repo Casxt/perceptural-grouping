@@ -1,7 +1,8 @@
 import torch
 from torch import nn
 from torchvision.models import mobilenet_v2
-from typing import List
+from typing import List, Tuple
+import numpy as np
 
 
 # v2 将register_forward_hook修改为原结构直出
@@ -168,9 +169,12 @@ class EdgeDetection(torch.nn.Module):
 
     @staticmethod
     def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
-        # log_p = input.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
-        # target_t = target.transpose(1, 2).transpose(2, 3).contiguous().view(1, -1)
-        # 正负样本统计
+        """
+        计算边缘损失
+        :param input: b, 1, w, h
+        :param target: b, 1, w, h
+        :return:
+        """
         pos_index = (target > 0)
         neg_index = (target == 0)
 
@@ -179,10 +183,49 @@ class EdgeDetection(torch.nn.Module):
         sum_num = pos_num + neg_num
 
         # 计算每个样本点的损失权重
-        weight = torch.empty(target.size()).cuda()
+        weight = torch.empty(target.size()).to(input.device)
         weight[pos_index] = neg_num / sum_num
         weight[neg_index] = pos_num / sum_num
         return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')
+
+    def batch_binary_cross_entropy_loss(self, input: torch.Tensor, target: torch.Tensor):
+        """
+        计算边缘损失
+        :param input: b, 1, w, h
+        :param target: b, 1, w, h
+        :return:
+        """
+        pos_index = (target > 0)
+        neg_index = (target == 0)
+        sum_num = input.shape[2] * input.shape[3]
+        # 逐样本计算正负样本数
+        pos_num = pos_index.view(input.shape[0], sum_num).sum(dim=1).type(torch.float)
+        neg_num = neg_index.view(input.shape[0], sum_num).sum(dim=1).type(torch.float)
+
+        # 扩张回矩阵大小
+        neg_num = (neg_num.view(input.shape[0], 1, 1, 1) / sum_num).expand(*input.shape).clone()
+        pos_num = (pos_num.view(input.shape[0], 1, 1, 1) / sum_num).expand(*input.shape).clone()
+
+        # 计算每个样本点的损失权重 正样本点权重为 负样本/全样本 负样本点权重 正样本/全样本
+        pos_num[pos_index] = neg_num[neg_index] = 0
+        weight = (pos_num + neg_num) / sum_num
+
+        # weight = torch.empty(target.size()).to(input.device)
+        # weight[pos_index] = neg_num / sum_num
+        # weight[neg_index] = pos_num / sum_num
+        # return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')
+        return torch.nn.CrossEntropyLoss(weight)(input, target)
+
+
+    def block_predict_loss(self, input: torch.Tensor, edge: torch.Tensor):
+        """
+        计算对于每一格block的边缘置信度损失，边缘位置损失
+        @param input: c, 3, 75, 100,
+        @param target: c, 3, 75, 100
+        @return:
+        """
+        has_edge = input[:, 0, :, :]
+        torch.nn.CrossEntropyLoss()(has_edge, edge)
 
     def get_mobiel_block(self):
         mobile_net_v2 = mobilenet_v2(pretrained=True).features[0:18]
@@ -192,9 +235,6 @@ class EdgeDetection(torch.nn.Module):
                 mobile_net_v2[11:14],
                 mobile_net_v2[14:18],
                 )
-
-    def get_gcn_block(self):
-        pass
 
     def _initialize_weights(self, *parts):
         for part in parts:
