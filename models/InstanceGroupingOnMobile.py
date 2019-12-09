@@ -153,10 +153,11 @@ class EdgeDetection(torch.nn.Module):
         # 获得topk的节点id, topk_index (batch, node)
         _topk, topk_index = torch.topk(
             edge_region_predict[:, 0, :, :].reshape(edge_region_predict.shape[0], -1), k=2000)
-        # 对节点index进行排序
+        # 对节点index进行排序, sorted_topk_index代表每个样本中边缘置信度最高的2000个点的一维坐标
+        # sorted_topk_index: b, 2000
         sorted_topk_index, _topk_index_index = topk_index.sort(dim=1)
 
-        # 取出node map
+        # 根据sorted_topk_index取出node map
         node_map = torch.cat(
             tuple(node_feature[batch, indices, :].unsqueeze(0) for batch, indices in enumerate(sorted_topk_index)),
             0)
@@ -165,7 +166,7 @@ class EdgeDetection(torch.nn.Module):
         node_output_feature = self.node_feature_grouping(
             torch.cat((node_map.unsqueeze(0), adjacent_map.unsqueeze(0)), 0))
 
-        return (*edge_outputs, edge_region_predict, node_output_feature)
+        return (*edge_outputs, edge_region_predict, sorted_topk_index, node_output_feature,)
 
     @staticmethod
     def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
@@ -202,7 +203,7 @@ class EdgeDetection(torch.nn.Module):
         pos_num = pos_index.view(input.shape[0], sum_num).sum(dim=1).type(torch.float)
         neg_num = neg_index.view(input.shape[0], sum_num).sum(dim=1).type(torch.float)
 
-        # 扩张回矩阵大小
+        # 扩张回矩阵大小， 并进行clone，保证各个元素之前不会互相影响
         neg_num = (neg_num.view(input.shape[0], 1, 1, 1) / sum_num).expand(*input.shape).clone()
         pos_num = (pos_num.view(input.shape[0], 1, 1, 1) / sum_num).expand(*input.shape).clone()
 
@@ -210,24 +211,59 @@ class EdgeDetection(torch.nn.Module):
         pos_num[pos_index] = neg_num[neg_index] = 0
         weight = (pos_num + neg_num) / sum_num
 
-        # weight = torch.empty(target.size()).to(input.device)
-        # weight[pos_index] = neg_num / sum_num
-        # weight[neg_index] = pos_num / sum_num
-        # return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')
         return torch.nn.CrossEntropyLoss(weight)(input, target)
 
+    def block_position_loss(self, input: torch.Tensor, target: torch.Tensor):
+        """
+        计算对于每一格block边缘位置损失
+        @param input: c, 2, 75, 100,
+        @param target: c, 2, 75, 100
+        @return: dist: loss
+        """
+        dist = (input - target).pow(2)
+        dist = dist[:, 0, :, :] + dist[:, 1, :, :]
+        return dist.sum()
 
-    def block_predict_loss(self, input: torch.Tensor, edge: torch.Tensor):
+    def node_grouping_loss(self, indices: torch.Tensor, inputs: torch.Tensor, types: torch.Tensor):
         """
-        计算对于每一格block的边缘置信度损失，边缘位置损失
-        @param input: c, 3, 75, 100,
-        @param target: c, 3, 75, 100
-        @return:
+        计算对于每一格block边缘位置损失
+        @param indices: b, 2000
+        @param inputs: b, 2000, 256
+        @param types: b, 1, 75, 100 每格类型的标注
+        @return: loss, a number
         """
-        has_edge = input[:, 0, :, :]
-        torch.nn.CrossEntropyLoss()(has_edge, edge)
+
+        # 距离矩阵 兼 邻接矩阵
+        dist_map = (torch.zeros(indices.shape[0],
+                                indices.shape[1],
+                                indices.shape[1],
+                                requires_grad=False)
+                    .to(indices.device))
+
+        # 生成表示点间距离的对称矩阵
+        for i in range(1, dist_map.shape[2]):
+            dist_map[:, i - 1, i:5] = dist_map[:, i:5, i - 1] = (
+                    (row[:, i:5] - row[:, i - 1:i]) ** 2 +
+                    (col[:, i:5] - col[:, i - 1:i]) ** 2
+            )
+
+
+        for batch, index in enumerate(indices):
+            inp = inputs[batch]
+            typ = types[batch, 0]
+            node_set = {int(t): [] for t in typ.unique()}
+            # 为每个
+            for i, pos in enumerate(index):
+                # 行坐标y, 列坐标x
+                y, x = (pos / types.shape[2]).floor(), (pos % types.shape[2])
+                node_set[typ[y, x]].append(inp[i])
+
 
     def get_mobiel_block(self):
+        """
+        获取mobile net的各个block
+        @return:
+        """
         mobile_net_v2 = mobilenet_v2(pretrained=True).features[0:18]
         return (mobile_net_v2[0:4],
                 mobile_net_v2[4:7],
@@ -257,18 +293,16 @@ class EdgeDetection(torch.nn.Module):
                                     sorted_topk_index.shape[1],
                                     requires_grad=False)
                         .to(sorted_topk_index.device))
-        # 行坐标y
-        row = (sorted_topk_index / feature_map_width).floor()
-        # 列坐标x
-        col = (sorted_topk_index % feature_map_width)
+        # 行坐标y, 列坐标x
+        row, col = (sorted_topk_index / feature_map_width).floor(), (sorted_topk_index % feature_map_width)
 
         # 生成表示点间距离的对称矩阵
         for i in range(1, adjacent_map.shape[2]):
-            adjacent_map[:, i - 1, i:5] = adjacent_map[:, i:5, i - 1] = (
+            adjacent_map[:, i - 1, i:adjacent_map.shape[2]] = adjacent_map[:, i:adjacent_map.shape[2], i - 1] = (
                     (row[:, i:5] - row[:, i - 1:i]) ** 2 +
                     (col[:, i:5] - col[:, i - 1:i]) ** 2
             )
-        # 4格对角线长5.656, 3格对角线长4.242, 同时将0-5的范围留空
+        # 点间距离小于 4格对角线长5.656, 3格对角线长4.242, 同时将0-5的范围留空
         adjacent_map[adjacent_map < 5 ** 2] = 0
         # 10格对角线长14.14121, 同时将1-14.5的范围留空
         adjacent_map[adjacent_map < 14.5 ** 2] = 0.5
