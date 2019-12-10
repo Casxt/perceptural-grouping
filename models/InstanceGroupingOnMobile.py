@@ -2,8 +2,7 @@ import math
 import torch
 from torch import nn
 from torchvision.models import mobilenet_v2
-from typing import List, Tuple
-import numpy as np
+from typing import List
 
 
 # v2 将register_forward_hook修改为原结构直出
@@ -17,7 +16,7 @@ import numpy as np
 # 17 BatchNorm2d(320, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
 # pool not used here
 
-class EdgeDetection(torch.nn.Module):
+class InstanceGrouping(torch.nn.Module):
     # layers, inChannels, midChannels, outChannels
     mobile_output_layer: List[int] = [[3, 24, 48, 1],
                                       [6, 32, 64, 1],
@@ -92,7 +91,7 @@ class EdgeDetection(torch.nn.Module):
         )
 
         self._initialize_weights(self.fuse_conv, *self.mobile_outputs_convs, self.edge_region_feature,
-                                 self.edge_region_predict)
+                                 self.edge_region_predict, self.node_feature_grouping)
 
     def forward(self, x):
         # b,c,h,w
@@ -136,7 +135,7 @@ class EdgeDetection(torch.nn.Module):
                   for x in range(0, 800, block_size) for y in range(0, 600, block_size)),
             1)  # b, n, f
 
-        # 区块预测网络, b, 3 * 75 * 100
+        # 区块预测网络, b, 3 * 75 * 100, has_edge, py, px
         edge_region_predict = torch.sigmoid(self.edge_region_predict(edge_region_feature))
 
         # 区块特征图转节点特征, 使用先行后列的遍历方式, 将64个通道的数据作为特征
@@ -162,12 +161,14 @@ class EdgeDetection(torch.nn.Module):
         node_map = torch.cat(
             tuple(node_feature[batch, indices, :].unsqueeze(0) for batch, indices in enumerate(sorted_topk_index)),
             0)
-        # 创建邻接图
-        adjacent_map = self.generate_adjacent_map(sorted_topk_index, edge_region_predict.shape[3])
+        # 创建邻接图, int包裹shape防止device error
+        adjacent_map = self.generate_adjacent_map(sorted_topk_index, int(edge_region_predict.shape[3]))
+
+        # b, 2000, 256, node_map和adjacent_map维度不同，不可以拼接
         node_output_feature = self.node_feature_grouping(
             torch.cat((node_map.unsqueeze(0), adjacent_map.unsqueeze(0)), 0))
 
-        return (*edge_outputs, edge_region_predict, sorted_topk_index, node_output_feature,)
+        return (*edge_outputs, edge_region_predict, sorted_topk_index, node_output_feature)
 
     @staticmethod
     def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
@@ -211,7 +212,6 @@ class EdgeDetection(torch.nn.Module):
         # 计算每个样本点的损失权重 正样本点权重为 负样本/全样本 负样本点权重 正样本/全样本
         pos_num[pos_index] = neg_num[neg_index] = 0
         weight = (pos_num + neg_num) / sum_num
-
         return torch.nn.CrossEntropyLoss(weight)(input, target)
 
     def block_position_loss(self, input: torch.Tensor, target: torch.Tensor):
@@ -225,16 +225,16 @@ class EdgeDetection(torch.nn.Module):
         dist = dist[:, 0, :, :] + dist[:, 1, :, :]
         return dist.sum()
 
-    def node_grouping_loss(self, indices: torch.Tensor, inputs: torch.Tensor, types: torch.Tensor, alpha=1, beta=0.5,
+    def node_grouping_loss(self, indices: torch.Tensor, inputs: torch.Tensor, types: torch.Tensor, alpha=1, beta=0.02,
                            gamma=0.1):
         """
         计算对于每一格block边缘位置损失
-        @param gamma:
-        @param beta:
+        @param gamma: 约束正样本间距
+        @param beta: 内类间距和类间间距的权重
+        @param alpha: 约束到负样本的距离比到正样本的距离大alpha
         @param indices: b, 2000
         @param inputs: b, 2000, 256
         @param types: b, 1, 75, 100 每格类型的标注
-        @param alpha: triplet loss 超参数 alpha
         @return: loss, a number
         """
 
@@ -291,7 +291,8 @@ class EdgeDetection(torch.nn.Module):
                 # triplet loss, https://link.springer.com/chapter/10.1007/978-3-319-48890-5_49
                 loss = torch.relu(positive - 0.5 * (negative + pn_dist) + alpha) + beta * torch.relu(positive - gamma)
                 perbatch_triplet_losses.append(loss)
-                triplet_loss[batch] = sum(perbatch_triplet_losses)
+
+            triplet_loss[batch] = sum(perbatch_triplet_losses) / len(node_sets)
         return triplet_loss.sum() / triplet_loss.shape[0]
 
     def get_mobiel_block(self):
@@ -328,9 +329,10 @@ class EdgeDetection(torch.nn.Module):
                                     sorted_topk_index.shape[1],
                                     requires_grad=False)
                         .to(sorted_topk_index.device))
-        # 行坐标y, 列坐标x, 均为tensor, 注意使用.floor()而不是math.floor()
+        # 行坐标y, 列坐标x, 均为tensor, 注意使用.floor()而不是math.floor(), sorted_topk_index 是Long型，不需要floor
         # b, 2000  b, 2000
-        row, col = (sorted_topk_index / feature_map_width).floor(), (sorted_topk_index % feature_map_width)
+        row, col = (sorted_topk_index / feature_map_width), (sorted_topk_index % feature_map_width)
+        print("row", row)
         map_length = adjacent_map.shape[2]
         # 生成表示点间距离的对称矩阵
         #   a  b  c
@@ -341,8 +343,8 @@ class EdgeDetection(torch.nn.Module):
         # 2. 计算 b到c 的距离
         for i in range(1, map_length):
             adjacent_map[:, i - 1, i:map_length] = adjacent_map[:, i:map_length, i - 1] = (
-                    (row[:, i:map_length] - row[:, i - 1:i]) ** 2 +
-                    (col[:, i:map_length] - col[:, i - 1:i]) ** 2
+                    torch.pow(row[:, i:map_length] - row[:, i - 1:i], 2) +
+                    torch.pow(col[:, i:map_length] - col[:, i - 1:i], 2)
             )
         # 点间距离小于 4格对角线长5.656, 3格对角线长4.242, 同时将0-5的范围留空
         adjacent_map[adjacent_map < 5 ** 2] = 0
@@ -416,15 +418,14 @@ class GraphConvolution(nn.Module):
         self.add_bias = add_bias
 
         # params
-        self.weight = nn.Parameter(torch.tensor(input_feature_num, self.output_feature_num, dtype=dtype))
-        self.bias = nn.Parameter(torch.tensor(self.graph_num, self.output_feature_num, dtype=dtype))
+        self.weight = nn.Parameter(torch.zeros(input_feature_num, self.output_feature_num, dtype=dtype))
+        self.bias = nn.Parameter(torch.zeros(self.graph_num, self.output_feature_num, dtype=dtype))
 
         # init params
         self.params_reset()
 
     def params_reset(self):
         nn.init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
-        nn.init.kaiming_normal_(self.merge, mode='fan_out', nonlinearity='relu')
         nn.init.constant_(self.bias, 0)
 
     def set_trainable(self, train=True):

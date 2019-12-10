@@ -106,7 +106,6 @@ class CitySpaceDataset(Dataset):
         transforms.RandomHorizontalFlip()
     ])
 
-    @staticmethod
 
     labels = [
         #       name                     id    trainId   category            catId     hasInstances   ignoreInEval   color
@@ -148,8 +147,6 @@ class CitySpaceDataset(Dataset):
     ]
 
     # 各个屏蔽等级中对应的label id
-    @staticmethod
-
     barrier_label = [
         # 0 级
         {*range(0, 12), 23, -1},

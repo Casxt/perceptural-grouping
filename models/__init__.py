@@ -5,3 +5,5 @@ from .EdgeDetectionOnMobile import EdgeDetection as EdgeDetectionOnMobile
 from .EdgeDetectionOnMobileV2 import EdgeDetection as EdgeDetectionOnMobileV2
 from .PerceptualEdgeDetection import PerceptualEdgeDetection
 from .PerceptualEdgeDetectionV2 import PerceptualEdgeDetection as  PerceptualEdgeDetectionV2
+
+from .InstanceGroupingOnMobile import InstanceGrouping
