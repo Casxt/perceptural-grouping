@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import nn
 from torchvision.models import mobilenet_v2
@@ -224,40 +225,74 @@ class EdgeDetection(torch.nn.Module):
         dist = dist[:, 0, :, :] + dist[:, 1, :, :]
         return dist.sum()
 
-    def node_grouping_loss(self, indices: torch.Tensor, inputs: torch.Tensor, types: torch.Tensor):
+    def node_grouping_loss(self, indices: torch.Tensor, inputs: torch.Tensor, types: torch.Tensor, alpha=1, beta=0.5,
+                           gamma=0.1):
         """
         计算对于每一格block边缘位置损失
+        @param gamma:
+        @param beta:
         @param indices: b, 2000
         @param inputs: b, 2000, 256
         @param types: b, 1, 75, 100 每格类型的标注
+        @param alpha: triplet loss 超参数 alpha
         @return: loss, a number
         """
 
-        # 距离矩阵 兼 邻接矩阵
+        # 距离矩阵 兼 邻接矩阵 b, 2000, 2000
         dist_map = (torch.zeros(indices.shape[0],
                                 indices.shape[1],
                                 indices.shape[1],
                                 requires_grad=False)
                     .to(indices.device))
 
-        # 生成表示点间距离的对称矩阵
-        for i in range(1, dist_map.shape[2]):
-            dist_map[:, i - 1, i:5] = dist_map[:, i:5, i - 1] = (
-                    (row[:, i:5] - row[:, i - 1:i]) ** 2 +
-                    (col[:, i:5] - col[:, i - 1:i]) ** 2
-            )
+        triplet_loss = torch.empty(indices.shape[0]).to(indices.device)
 
+        map_length = dist_map.shape[2]
+        # 生成表示点间距离的对称矩阵
+        # 生成表示点间距离的对称矩阵
+        #   a  b  c
+        # a 0  *  *
+        # b *  0  +
+        # c *  +  0
+        # 1. 计算 a到 b, c 的距离 *
+        # 2. 计算 b到c 的距离 +
+        for i in range(1, dist_map.shape[2]):
+            dist_map[:, i - 1, i:map_length] = dist_map[:, i:map_length, i - 1] = (
+                    inputs[:, i:map_length, :] - inputs[:, i - 1:i, :]
+            ).pow(2).sum(dim=2)
 
         for batch, index in enumerate(indices):
             inp = inputs[batch]
             typ = types[batch, 0]
-            node_set = {int(t): [] for t in typ.unique()}
-            # 为每个
+            dist = dist_map[batch]
+            node_sets = {int(t): [] for t in typ.unique()}
+            # 将node分组
             for i, pos in enumerate(index):
                 # 行坐标y, 列坐标x
                 y, x = (pos / types.shape[2]).floor(), (pos % types.shape[2])
-                node_set[typ[y, x]].append(inp[i])
-
+                node_sets[typ[y, x]].append(inp[i])
+            # 计算每个batch中每组的triple let loss
+            perbatch_triplet_losses = []
+            for _k, node_set in node_sets:
+                # 取出其他组的nodes
+                other_group_nodes = set()
+                for k, node_set in filter(lambda k, v: k != _k, node_sets):
+                    other_group_nodes = other_group_nodes.union(node_set)
+                other_group_nodes = tuple(other_group_nodes)
+                node_set = tuple(node_set)
+                # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
+                negative, negative_index = dist[node_set, :][:, other_group_nodes].view(-1).min()
+                negative_x = int(negative_index) % len(other_group_nodes)
+                # 找到同组的最大间距, 并且获取
+                positive, positive_index = dist[node_set, :][:, node_set].view(-1).max()
+                positive_y = math.floor(positive_index / len(node_set))
+                # 正负样本间距
+                pn_dist = dist[node_set, :][:, other_group_nodes][positive_y, negative_x]
+                # triplet loss, https://link.springer.com/chapter/10.1007/978-3-319-48890-5_49
+                loss = torch.relu(positive - 0.5 * (negative + pn_dist) + alpha) + beta * torch.relu(positive - gamma)
+                perbatch_triplet_losses.append(loss)
+                triplet_loss[batch] = sum(perbatch_triplet_losses)
+        return triplet_loss.sum() / triplet_loss.shape[0]
 
     def get_mobiel_block(self):
         """
@@ -287,20 +322,27 @@ class EdgeDetection(torch.nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def generate_adjacent_map(self, sorted_topk_index: torch.Tensor, feature_map_width):
-        # 距离矩阵 兼 邻接矩阵
+        # 距离矩阵 兼 邻接矩阵 b, 2000, 2000
         adjacent_map = (torch.zeros(sorted_topk_index.shape[0],
                                     sorted_topk_index.shape[1],
                                     sorted_topk_index.shape[1],
                                     requires_grad=False)
                         .to(sorted_topk_index.device))
-        # 行坐标y, 列坐标x
+        # 行坐标y, 列坐标x, 均为tensor, 注意使用.floor()而不是math.floor()
+        # b, 2000  b, 2000
         row, col = (sorted_topk_index / feature_map_width).floor(), (sorted_topk_index % feature_map_width)
-
+        map_length = adjacent_map.shape[2]
         # 生成表示点间距离的对称矩阵
-        for i in range(1, adjacent_map.shape[2]):
-            adjacent_map[:, i - 1, i:adjacent_map.shape[2]] = adjacent_map[:, i:adjacent_map.shape[2], i - 1] = (
-                    (row[:, i:5] - row[:, i - 1:i]) ** 2 +
-                    (col[:, i:5] - col[:, i - 1:i]) ** 2
+        #   a  b  c
+        # a 0  *  *
+        # b *  0  +
+        # c *  +  0
+        # 1. 计算 a到 b, c 的距离
+        # 2. 计算 b到c 的距离
+        for i in range(1, map_length):
+            adjacent_map[:, i - 1, i:map_length] = adjacent_map[:, i:map_length, i - 1] = (
+                    (row[:, i:map_length] - row[:, i - 1:i]) ** 2 +
+                    (col[:, i:map_length] - col[:, i - 1:i]) ** 2
             )
         # 点间距离小于 4格对角线长5.656, 3格对角线长4.242, 同时将0-5的范围留空
         adjacent_map[adjacent_map < 5 ** 2] = 0
