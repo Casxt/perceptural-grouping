@@ -174,7 +174,6 @@ class CitySpaceDataset(Dataset):
     @staticmethod
     def _load_ground_truth(path: Path):
         i = Image.open(path)
-        print(i.size)
         return i
 
     @staticmethod
@@ -209,7 +208,8 @@ class CitySpaceDataset(Dataset):
                 dist_source[0, y, x], dist_source[1, y, x] = y, x
         px, py = (block_width - 1) / 2, (block_height - 1) / 2
         pos = dist_source
-        dist = np.sqrt(np.power(pos[0] - py, 2) + np.power(pos[1] - px, 2))
+        # 1, 8, 8
+        dist = np.sqrt(np.power(pos[0] - py, 2) + np.power(pos[1] - px, 2)).unsqueeze(0)
         return lambda: dist.clone()
 
     @staticmethod
@@ -229,8 +229,8 @@ class CitySpaceDataset(Dataset):
         dist = get_distance_mat()
         dist[edge_mask] = 65535
         ind_max_src = torch.argmin(dist)
-        # 行坐标y, 列坐标x
-        return True, (ind_max_src / w).floor(), (ind_max_src % w)
+        # 行坐标y, 列坐标x, ind_max_src 是Long型，不需要floor
+        return True, (ind_max_src / w), (ind_max_src % w)
 
     @staticmethod
     def get_block_instance(instance_block: torch.Tensor):
@@ -264,6 +264,7 @@ class CitySpaceDataset(Dataset):
     def get_block_ground_truth(self, instance: torch.Tensor, edge: torch.Tensor) -> torch.Tensor:
         """
         获取区块预测的ground truth
+        @param instance: 1, h, w
         @param edge: 1, h, w
         @return: 4, h/block, w/block,  4个channel分别代表是否包含边缘，边缘y位置， 边缘x位置, 小块类别
         """
@@ -273,8 +274,8 @@ class CitySpaceDataset(Dataset):
         block_gt = torch.empty((4, int(h / block_size), int(w / block_size)), dtype=torch.float).to(edge.device)
         for x in range(0, w, block_width):
             for y in range(0, h, block_height):
-                edge_block = edge[y:y + block_height, x:x + block_width]
-                instance_block = instance[y:y + block_height, x:x + block_width]
+                edge_block = edge[:, y:y + block_height, x:x + block_width]
+                instance_block = instance[:, y:y + block_height, x:x + block_width]
 
                 has_edge, ny, nx = CitySpaceDataset.found_nearest_edge(edge_block, self.get_distance_mat)
 
@@ -284,9 +285,9 @@ class CitySpaceDataset(Dataset):
                 block_label = 34  # 34 是数据集中不存在的一个值
                 if has_edge:
                     block_label = CitySpaceDataset.get_block_instance(instance_block)
-                block_gt[:, y / block_height, x / block_width] = \
+                block_gt[:, int(y / block_height), int(x / block_width)] = \
                     torch.tensor((1 if has_edge else 0, ny, nx, block_label),
-                                 dtype=block_gt.dtype,
+                                 dtype=torch.float,
                                  device=block_gt.device)
         return block_gt
 
@@ -302,10 +303,8 @@ class CitySpaceDataset(Dataset):
 
         random.seed(seed)
         image: torch.Tensor = self.transform(Image.open(self.data[index]))
-
         edge: torch.Tensor = torch.from_numpy(CitySpaceDataset._get_edge(gt.numpy()[0, :, :])).float()
-
+        edge = edge.unsqueeze(0)
         block_gt = self.get_block_ground_truth(gt, edge)
-
-        return image, gt, edge.unsqueeze(0), block_gt
+        return image, gt, edge, block_gt
         # return image(3, 600, 800), gt(1, 600, 800), edge(1, 600, 800), block_gt(4, 75, 100)

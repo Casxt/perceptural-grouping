@@ -7,14 +7,6 @@ from typing import List
 
 # v2 将register_forward_hook修改为原结构直出
 
-# struct of vgg16.features
-# 1 BatchNorm2d(16, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-# 3 BatchNorm2d(24, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-# 6 BatchNorm2d(32, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-# 10 BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-# 13 BatchNorm2d(96, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-# 17 BatchNorm2d(320, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-# pool not used here
 
 class InstanceGrouping(torch.nn.Module):
     # layers, inChannels, midChannels, outChannels
@@ -57,45 +49,63 @@ class InstanceGrouping(torch.nn.Module):
         )
 
         # 区块特征提取
+        # self.edge_region_feature = nn.Sequential(
+        #     # 600 * 800
+        #     nn.Conv2d(6, 24, 1, bias=False),
+        #     InvertedResidual(24, 24, 1, 2),
+        #     # 600 * 800
+        #     nn.Conv2d(24, 32, 3, stride=2, padding=1),
+        #     # 300 * 400
+        #     nn.Conv2d(32, 48, 3, stride=2, padding=1),
+        #     # 150 * 200
+        #     nn.Conv2d(48, 64, 3, stride=2, padding=1),
+        #     # 64 * 75 * 100
+        #     nn.BatchNorm2d(64),
+        #     nn.ReLU6(inplace=True),
+        # )
+
+        # 区块特征提取
         self.edge_region_feature = nn.Sequential(
-            # 600 * 800
-            nn.Conv2d(6, 24, 1, bias=False),
-            InvertedResidual(24, 24, 1, 2),
-            # 600 * 800
-            nn.Conv2d(24, 32, 3, stride=2, padding=1),
             # 300 * 400
-            nn.Conv2d(32, 48, 3, stride=2, padding=1),
+            nn.Conv2d(536, 640, 1, bias=False),
+            InvertedResidual(640, 640, 1, 2),
+            # 300 * 400
+            nn.Conv2d(640, 896, 3, stride=2, padding=1),
             # 150 * 200
-            nn.Conv2d(48, 64, 3, stride=2, padding=1),
-            # 64 * 75 * 100
-            nn.BatchNorm2d(64),
+            nn.Conv2d(896, 1024, 3, stride=2, padding=1),
+            # 1024 * 75 * 100
+            InvertedResidual(1024, 1024, 1, 2),
+            # 1024 * 75 * 100
             nn.ReLU6(inplace=True),
         )
 
         # 区块是否包含边缘置信度预测
         self.edge_region_predict = nn.Sequential(
             # 64 * 75 * 100
+            InvertedResidual(1024, 256, 1, 2),
+            InvertedResidual(256, 64, 1, 2),
             InvertedResidual(64, 64, 1, 2),
-            nn.Conv2d(64, 32, 1),
-            nn.Conv2d(32, 3, 1),
+            nn.Conv2d(64, 3, 1),
             # 3 * 75 * 100
         )
 
         # GCN处理, 内部包含init, 不需要显示init
         self.node_feature_grouping = nn.Sequential(
             # 2000, 64 + 64 * 8 * 8 = 4160
-            GraphConvolution(2000, 4160, 1024),
-            GraphConvolution(2000, 1024, 1024),
-            GraphConvolution(2000, 1024, 256),
+            GraphConvolution(2000, 1024, 512),
+            GraphConvolution(2000, 512, 512),
+            GraphConvolution(2000, 512, 256),
             # 2000, 256
         )
+        # self.node_feature_grouping_0 = GraphConvolution(2000, 4160, 1024)
+        # self.node_feature_grouping_1 = GraphConvolution(2000, 1024, 1024)
+        # self.node_feature_grouping_2 = GraphConvolution(2000, 4160, 256)
 
         self._initialize_weights(self.fuse_conv, *self.mobile_outputs_convs, self.edge_region_feature,
                                  self.edge_region_predict, self.node_feature_grouping)
 
     def forward(self, x):
         # b,c,h,w
-        size = x.size()[2:4]
 
         # mobile block
         mobile_net_v2_output0 = self.mobile_net_v2_b0(x)
@@ -111,29 +121,30 @@ class InstanceGrouping(torch.nn.Module):
         edge_outputs: list[torch.Tensor] = []
         for i, output in enumerate(mobile_outputs):
             output = self.mobile_outputs_convs[i](output)
-            output = nn.functional.interpolate(output, size=size, mode="bilinear")
+            output = nn.functional.interpolate(output, size=x.size()[2:4], mode="bilinear")
             edge_outputs.append(torch.sigmoid(output))
 
         edge_fuse_output = torch.sigmoid(self.fuse_conv(torch.cat([x, *edge_outputs], 1)))
         edge_outputs.append(edge_fuse_output)
 
         # 边缘特征
-        feature_map_list = list(
-            map(lambda f: nn.functional.interpolate(output, size=size, mode="bilinear"), mobile_outputs))
-        feature_map_list.append(edge_fuse_output)
-        feature_map = torch.cat(feature_map_list, 1)  # 64 * 600 * 800
+        h, w = x.size()[2:4]
+        feature_map_list = tuple(
+            map(lambda f: nn.functional.interpolate(f, size=(int(h / 2), int(w / 2)), mode="bilinear"), mobile_outputs))
+        # feature_map_list.append(edge_fuse_output)
+        feature_map = torch.cat(feature_map_list, 1)  # 536 * 300 * 400
 
         # 区块特征 b, 64, 75, 100
         edge_region_feature = self.edge_region_feature(feature_map)
 
         # 边缘特征图转节点特征, 使用先行后列的遍历方式, 将64个通道上每8*8大小区块的数据展平作为特征
         # feature_map 64 * 600 * 800 -> backend_node_feature 7500 * (64 * 8 * 8)
-        block_size = 8
-        backend_node_feature = torch.cat(
-            tuple(feature_map[:, :, y:y + block_size, x:x + block_size]
-                  .reshape(feature_map.shape[0], 1, feature_map.shape[1] * block_size * block_size)
-                  for x in range(0, 800, block_size) for y in range(0, 600, block_size)),
-            1)  # b, n, f
+        # block_size = 8
+        # backend_node_feature = torch.cat(
+        #     tuple(feature_map[:, :, y:y + block_size, x:x + block_size]
+        #           .reshape(feature_map.shape[0], 1, feature_map.shape[1] * block_size * block_size)
+        #           for x in range(0, 800, block_size) for y in range(0, 600, block_size)),
+        #     dim=1)  # b, n, f
 
         # 区块预测网络, b, 3 * 75 * 100, has_edge, py, px
         edge_region_predict = torch.sigmoid(self.edge_region_predict(edge_region_feature))
@@ -145,10 +156,11 @@ class InstanceGrouping(torch.nn.Module):
             tuple(edge_region_feature[:, :, y, x]
                   .reshape(edge_region_feature.shape[0], 1, edge_region_feature.shape[1])
                   for x in range(0, 100) for y in range(0, 75)),
-            1)  # b, n, f
+            dim=1)  # b, n, f
 
         # 将边缘网络和区块网络的特征拼接
-        node_feature = torch.cat((block_feature, backend_node_feature), 2)
+        # node_feature = torch.cat((block_feature, backend_node_feature), dim=2)
+        node_feature = block_feature
 
         # 获得topk的节点id, topk_index (batch, node)
         _topk, topk_index = torch.topk(
@@ -162,13 +174,20 @@ class InstanceGrouping(torch.nn.Module):
             tuple(node_feature[batch, indices, :].unsqueeze(0) for batch, indices in enumerate(sorted_topk_index)),
             0)
         # 创建邻接图, int包裹shape防止device error
-        adjacent_map = self.generate_adjacent_map(sorted_topk_index, int(edge_region_predict.shape[3]))
+        adjacent_map = self.generate_adjacent_map(sorted_topk_index, edge_region_predict.shape[3])
 
-        # b, 2000, 256, node_map和adjacent_map维度不同，不可以拼接
+        # b, 2000, 2000 + 256, adjacent_map和node_map维度不同，需要横向拼接
+        #   a  b  c  f1 f2
+        # a 0  *  *  -  -
+        # b *  0  +  -  -
+        # c *  +  0  -  -
+        # 处理完成后通过[:, :, adjacent_map_width:]取出feature
         node_output_feature = self.node_feature_grouping(
-            torch.cat((node_map.unsqueeze(0), adjacent_map.unsqueeze(0)), 0))
-
-        return (*edge_outputs, edge_region_predict, sorted_topk_index, node_output_feature)
+            torch.cat((adjacent_map, node_map), dim=2))
+        node_output_feature = node_output_feature[:, :, adjacent_map.shape[1]:]
+        print("node_output_feature", node_output_feature.shape, node_output_feature[0, 0, 0])
+        return (*edge_outputs, edge_region_predict, sorted_topk_index,
+                node_output_feature)
 
     @staticmethod
     def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
@@ -212,7 +231,8 @@ class InstanceGrouping(torch.nn.Module):
         # 计算每个样本点的损失权重 正样本点权重为 负样本/全样本 负样本点权重 正样本/全样本
         pos_num[pos_index] = neg_num[neg_index] = 0
         weight = (pos_num + neg_num) / sum_num
-        return torch.nn.CrossEntropyLoss(weight)(input, target)
+        return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')
+        # return torch.nn.CrossEntropyLoss(weight)(input, target)
 
     def block_position_loss(self, input: torch.Tensor, target: torch.Tensor):
         """
@@ -268,9 +288,9 @@ class InstanceGrouping(torch.nn.Module):
             node_sets = {int(t): [] for t in typ.unique()}
             # 将node分组
             for i, pos in enumerate(index):
-                # 行坐标y, 列坐标x
-                y, x = (pos / types.shape[2]).floor(), (pos % types.shape[2])
-                node_sets[typ[y, x]].append(inp[i])
+                # 行坐标y, 列坐标x, pos 是 long 型 不需要 .floor()
+                y, x = pos / types.shape[3], (pos % types.shape[3])
+                node_sets[int(typ[y, x])].append(inp[i])
             # 计算每个batch中每组的triple let loss
             perbatch_triplet_losses = []
             for _k, node_set in node_sets:
@@ -322,7 +342,7 @@ class InstanceGrouping(torch.nn.Module):
                     nn.init.normal_(m.weight, 0, 0.01)
                     nn.init.constant_(m.bias, 0)
 
-    def generate_adjacent_map(self, sorted_topk_index: torch.Tensor, feature_map_width):
+    def generate_adjacent_map(self, sorted_topk_index: torch.Tensor, feature_map_width: torch.Size):
         # 距离矩阵 兼 邻接矩阵 b, 2000, 2000
         adjacent_map = (torch.zeros(sorted_topk_index.shape[0],
                                     sorted_topk_index.shape[1],
@@ -331,9 +351,8 @@ class InstanceGrouping(torch.nn.Module):
                         .to(sorted_topk_index.device))
         # 行坐标y, 列坐标x, 均为tensor, 注意使用.floor()而不是math.floor(), sorted_topk_index 是Long型，不需要floor
         # b, 2000  b, 2000
-        row, col = (sorted_topk_index / feature_map_width), (sorted_topk_index % feature_map_width)
-        print("row", row)
-        map_length = adjacent_map.shape[2]
+        row, col = (sorted_topk_index / int(feature_map_width)), (sorted_topk_index % int(feature_map_width))
+        map_length = int(adjacent_map.shape[2])
         # 生成表示点间距离的对称矩阵
         #   a  b  c
         # a 0  *  *
@@ -409,7 +428,7 @@ class InvertedResidual(nn.Module):
 
 class GraphConvolution(nn.Module):
 
-    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float64):
+    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float):
         super().__init__()
         # shapes
         self.graph_num = node_num
@@ -432,17 +451,18 @@ class GraphConvolution(nn.Module):
         for param in self.parameters():
             param.requires_grad = train
 
-    def forward(self, input):
+    def forward(self, inp: torch.Tensor):
         """
-        :param node_feature: (batch, graph_num, in_feature_num)
-        :param adjacent: (batch, graph_num, graph_num)
-        :return:
+        @param inp : adjacent: (batch, graph_num, graph_num) cat node_feature: (batch, graph_num, in_feature_num) -> (batch, graph_num, graph_num + in_feature_num)
+        @return:
         """
-        node_feature, adjacent = input
+        b, g, t = inp.shape
+        adjacent, node_feature = inp[:, :, 0:g], inp[:, :, g:t]
         x = torch.matmul(adjacent, node_feature)
         x = torch.matmul(x, self.weight)
         if self.add_bias:
             x = x + self.bias
+        # short cut
         if self.input_feature_num == self.output_feature_num:
             x = x + node_feature
-        return x
+        return torch.cat((adjacent, x), dim=2)

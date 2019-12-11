@@ -26,7 +26,9 @@ writer = SummaryWriter(Path("/root/perceptual_grouping/log", subPath))
 # dataSet = BSDS500(Path("/root/perceptual_grouping/dataset/BSDS500"))
 dataSet = CitySpace(Path("/root/perceptual_grouping/dataset/cityspace"))
 net: InstanceGrouping = InstanceGrouping().cuda(device)
-writer.add_graph(net, torch.rand(1, 3, 600, 800).cuda(device), True)
+# writer.add_graph(net, torch.rand(1, 3, 600, 800).cuda(device), True)
+# print("add_graph")
+# exit()
 # define the optimizer
 optimizer = torch.optim.RMSprop([
     {'params': net.mobile_net_v2_b0.parameters(), "lr": 0},
@@ -50,13 +52,12 @@ optimizer = torch.optim.RMSprop([
 step, val_step = 0, 0
 for epoch in range(epochs):
     net.train()
-    losses = [torch.tensor([0.]).cuda(device)] * 6
 
     if epoch == 2:
         for p in optimizer.param_groups:
             p["lr"] = 1e-4
 
-    train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=False, num_workers=workernum, batch_size=batchSize)
+    train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=True, num_workers=workernum, batch_size=batchSize)
     for index, batch in enumerate(train):
         losses = [torch.tensor([0.]).cuda(device)] * 6
         imgs, gts, edges, block_gt = to_device(device, *batch)
@@ -77,7 +78,6 @@ for epoch in range(epochs):
         node_pos_loss = net.block_position_loss(edge_region_predict[:, 1:3], block_gt[:, 1:3])
         # node feature loss
         node_feature_loss = net.node_grouping_loss(sorted_topk_index, node_output_feature, block_gt[:, 3:4])
-
         # 只约束edge的fuse层输出
         edge_loss = sum(losses)
         total_loss = edge_loss + node_edge_loss + node_pos_loss + node_feature_loss
@@ -125,6 +125,7 @@ for epoch in range(epochs):
             # for i, ans in enumerate(anss):
             #     step_losses[i] = net.batch_binary_cross_entropy_loss(ans, edges).detach()
             #     total_edge_loss += step_losses[i]
+
             step_edge_losses[5] = net.batch_binary_cross_entropy_loss(e_6, edges).detach()
 
             # node edge loss, 注意此处0：1 保证维度是b, 1, r, c 否则维度将变为b, r, c
