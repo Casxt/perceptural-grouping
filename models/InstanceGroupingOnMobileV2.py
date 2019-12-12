@@ -34,7 +34,7 @@ class InstanceGrouping(torch.nn.Module):
         self.edge_region_feature = nn.Sequential(
             # 150 * 200
             nn.Conv2d(536, 256, 1, bias=False),
-            InvertedResidual(256, 512, 3, 2),
+            InvertedResidual(256, 512, 2, 2),
             # 1024 * 75 * 100
             InvertedResidual(512, 512, 1, 2),
             # 512 * 75 * 100
