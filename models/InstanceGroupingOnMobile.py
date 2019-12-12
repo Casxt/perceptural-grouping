@@ -256,12 +256,7 @@ class InstanceGrouping(torch.nn.Module):
             # 不一定每个instances id 都有内容
             for this_ins, node_set in filter(lambda kv: len(kv[1]) > 0, node_sets.items()):
                 # 取出其他组的nodes
-                # node_set = tuple(node_set)
                 other_group_nodes = tuple(set(range(2000)) - set(node_set))
-                # for _k, that_node_set in filter(lambda kv: kv[0] != this_ins, node_sets.items()):
-                #     other_group_nodes = other_group_nodes.union(that_node_set)
-                # other_group_nodes = tuple(other_group_nodes)
-
                 # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
                 negative, negative_index = dist[node_set, :][:, other_group_nodes].view(-1).min(dim=0)
                 negative_x = int(negative_index) % len(other_group_nodes)
