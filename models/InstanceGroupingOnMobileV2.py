@@ -15,7 +15,8 @@ class InstanceGrouping(torch.nn.Module):
                                       [10, 64, 128, 1],
                                       [13, 96, 192, 1],
                                       [17, 320, 512, 1]]
-    mobile_outputs_convs: List[torch.nn.Sequential] = [None for i in mobile_output_layer]
+
+    # mobile_outputs_convs: List[torch.nn.Sequential] = [None for i in mobile_output_layer]
 
     def __init__(self):
         super().__init__()
@@ -45,8 +46,9 @@ class InstanceGrouping(torch.nn.Module):
             # 64 * 75 * 100
             InvertedResidual(512, 256, 1, 2),
             InvertedResidual(256, 128, 1, 2),
-            InvertedResidual(128, 3, 1, 2),
-            InvertedResidual(3, 3, 1, 2),
+            InvertedResidual(128, 32, 1, 2),
+            InvertedResidual(32, 32, 1, 2),
+            InvertedResidual(32, 3, 1, 2),
             # 3 * 75 * 100
         )
 
@@ -55,12 +57,13 @@ class InstanceGrouping(torch.nn.Module):
             # 2000, 512
             nn.ReLU6(inplace=True),
             GraphConvolution(2000, 512, 128),
+            nn.InstanceNorm1d(2000)
             # nn.BatchNorm1d(2000),
-            GraphConvolution(2000, 128, 128),
+            # GraphConvolution(2000, 128, 128),
             # 2000, 128
         )
 
-        self._initialize_weights(self.fuse_conv, *self.mobile_outputs_convs, self.edge_region_feature,
+        self._initialize_weights(self.fuse_conv, self.edge_region_feature,
                                  self.edge_region_predict, self.node_feature_grouping)
 
     def forward(self, x):
@@ -79,18 +82,19 @@ class InstanceGrouping(torch.nn.Module):
         feature_map_list = tuple(
             map(lambda f: nn.functional.interpolate(f, size=(int(h / 4), int(w / 4)), mode="bilinear"), mobile_outputs))
 
+        feature_map = torch.cat(feature_map_list, 1)  # 536 * 150 * 200
+
         # 边缘 up to 600 * 800
         edge_fuse_output = torch.sigmoid(
-            self.fuse_conv(nn.functional.interpolate(feature_map_list, size=(int(h), int(w)))))
-
-        feature_map = torch.cat(feature_map_list, 1)  # 536 * 150 * 200
+            self.fuse_conv(nn.functional.interpolate(feature_map, size=(int(h), int(w)))))
 
         # 区块特征 b, 512, 75, 100
         edge_region_feature = self.edge_region_feature(feature_map)
 
         # 区块预测网络, b, 3 * 75 * 100, has_edge, py, px
-        edge_region_predict = torch.tanh(self.edge_region_predict(edge_region_feature))
-
+        edge_region_predict = self.edge_region_predict(edge_region_feature)
+        edge_region_predict[:, 0:1] = torch.sigmoid(edge_region_predict[:, 0:1])
+        edge_region_predict[:, 1:3] = torch.tanh(edge_region_predict[:, 1:3])
         # 区块特征图转节点特征, 使用先行后列的遍历方式, 将64个通道的数据作为特征
         # edge_region_feature 64 * 75 * 100 -> backend_node_feature 7500 * 64
         # edge_region_predict_and_feature = torch.cat((edge_region_predict, edge_region_feature), dim=1)
@@ -129,7 +133,8 @@ class InstanceGrouping(torch.nn.Module):
         node_output_feature = self.node_feature_grouping(
             node_feature_grouping_inp)
 
-        node_output_feature = torch.tanh(node_output_feature[:, :, adjacent_map.shape[1]:])
+        # 归一化到 -1 到 1
+        node_output_feature = node_output_feature[:, :, adjacent_map.shape[1]:]
         return (edge_fuse_output, edge_region_predict, sorted_topk_index,
                 node_output_feature)
 
@@ -155,7 +160,7 @@ class InstanceGrouping(torch.nn.Module):
         pos_num[pos_index] = 0
         neg_num[neg_index] = 0
         weight = (pos_num + neg_num) / sum_num
-        return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')
+        return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='sum') / input.shape[0]
         # print(weight.squeeze(dim=1).shape, input.squeeze(dim=1).shape, target.squeeze(dim=1).shape)
         # return torch.nn.CrossEntropyLoss(weight.squeeze(dim=1), reduction='mean')(input.squeeze(dim=1), target.squeeze(dim=1).long())
 
@@ -224,7 +229,7 @@ class InstanceGrouping(torch.nn.Module):
             batch_triplet_losses = []
 
             # 不一定每个instances id 都有内容
-            for this_ins, node_set in filter(lambda kv: len(kv[1]) > 0, node_sets.items()):
+            for this_ins, node_set in filter(lambda kv: 0 < len(kv[1]) < 1999, node_sets.items()):
                 # 取出其他组的nodes
                 other_group_nodes = tuple(set(range(2000)) - set(node_set))
                 # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
@@ -240,7 +245,75 @@ class InstanceGrouping(torch.nn.Module):
                 batch_triplet_losses.append(loss)
             triplet_loss[batch] = sum(batch_triplet_losses) / len(node_sets)
 
-        return triplet_loss.sum() / triplet_loss.shape[0]
+        return triplet_loss.sum() / triplet_loss.shape[0], dist_map
+
+    def node_grouping_loss_v2(self, indices: torch.Tensor, nodes_feature: torch.Tensor, instances_map: torch.Tensor,
+                              alpha=1,
+                              beta=0.02,
+                              gamma=0.1):
+        """
+        计算对于每一格block边缘位置损失
+        @param gamma: 约束正样本间距
+        @param beta: 内类间距和类间间距的权重
+        @param alpha: 约束到负样本的距离比到正样本的距离大alpha
+        @param indices: b, 2000
+        @param nodes_feature: b, 2000, 256
+        @param instances_map: b, 1, 75, 100 每格类型的标注
+        @return: loss, a number
+        """
+
+        # 距离矩阵 兼 邻接矩阵 b, 2000, 2000
+        dist_map = (torch.zeros(indices.shape[0],
+                                indices.shape[1],
+                                indices.shape[1],
+                                requires_grad=False)
+                    .to(indices.device))
+
+        triplet_loss = torch.empty(indices.shape[0]).to(indices.device)
+
+        map_length = dist_map.shape[2]
+        # 生成表示点间距离的对称矩阵
+        # 生成表示点间距离的对称矩阵
+        #   a  b  c
+        # a 0  *  *
+        # b *  0  +
+        # c *  +  0
+        # 1. 计算 a到 b, c 的距离 *
+        # 2. 计算 b到c 的距离 +
+        for i in range(1, dist_map.shape[2]):
+            dist_map[:, i - 1, i:map_length] = dist_map[:, i:map_length, i - 1] = (
+                    nodes_feature[:, i:map_length, :] - nodes_feature[:, i - 1:i, :]
+            ).pow(2).sum(dim=2)
+
+        for batch, index in enumerate(indices):
+            # inp = nodes_feature[batch]
+            ins = instances_map[batch, 0]
+            dist = dist_map[batch]
+            # 每组包含n个node的index, index 为node在2000个nodes中的顺序，用于在dist_map中索引该node
+            node_sets = {int(t): [] for t in ins.unique()}
+            # 将node分组
+            for i, pos in enumerate(index):
+                # 行坐标y, 列坐标x, pos 是 long 型 不需要 .floor()
+                y, x = pos / instances_map.shape[3], (pos % instances_map.shape[3])
+                node_sets[int(ins[y, x])].append(i)
+
+            # 计算每个batch中每组的triple let loss
+            batch_triplet_losses = []
+
+            # 不一定每个instances id 都有内容
+            for this_ins, node_set in filter(lambda kv: 0 < len(kv[1]) < 1999, node_sets.items()):
+                # 取出其他组的nodes
+                other_group_nodes = tuple(set(range(2000)) - set(node_set))
+                # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
+                negative = dist[node_set, :][:, other_group_nodes] - 1.2
+                negative_loss = negative[negative < 0].sum() * -1
+                # 找到同组的最大间距, 并且获取
+                positive = dist[node_set, :][:, node_set] - 1
+                positive_loss = positive[positive > 0].sum()
+                batch_triplet_losses.append(positive_loss + negative_loss)
+            triplet_loss[batch] = sum(batch_triplet_losses) / len(node_sets)
+
+        return triplet_loss.sum() / triplet_loss.shape[0], dist_map
 
     def get_mobiel_block(self):
         """
