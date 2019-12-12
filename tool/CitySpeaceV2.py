@@ -11,7 +11,7 @@ from collections import namedtuple
 from torch.utils.data import Dataset
 import torchvision
 from torchvision.transforms import transforms
-from typing import List
+from typing import List, Any, Callable
 
 Label = namedtuple('Label', [
 
@@ -106,7 +106,6 @@ class CitySpaceDataset(Dataset):
         transforms.RandomHorizontalFlip()
     ])
 
-
     labels = [
         #       name                     id    trainId   category            catId     hasInstances   ignoreInEval   color
         Label('unlabeled', 0, 0, 'void', 0, False, True, (0, 0, 0)),
@@ -160,7 +159,7 @@ class CitySpaceDataset(Dataset):
         {*range(24, 34)},
         # 5 级
         {*range(24, 34)},
-        # 3 级
+        # 6 级
         {19, 20},
     ]
 
@@ -221,13 +220,13 @@ class CitySpaceDataset(Dataset):
         @return: bool, y, x, category
         """
         c, h, w = edge_block.shape
-        # 取出边缘， 边缘值统一为255
-        edge_mask = edge_block <= 254
+        # 取出非边缘， 边缘值会接近1
+        no_edge_mask = edge_block < 0.5
         # 如果小块中没有边缘, 不检测其id
-        if edge_mask.sum() == edge_mask.shape[0] * edge_mask.shape[1]:
+        if no_edge_mask.sum() == no_edge_mask.numel():
             return False, (w - 1) / 2, (h - 1) / 2
         dist = get_distance_mat()
-        dist[edge_mask] = 65535
+        dist[no_edge_mask] = 65535
         ind_max_src = torch.argmin(dist)
         # 行坐标y, 列坐标x, ind_max_src 是Long型，不需要floor
         return True, (ind_max_src / w), (ind_max_src % w)
@@ -240,10 +239,11 @@ class CitySpaceDataset(Dataset):
         @return:
         """
         # 判定所属分类
-        get_id = lambda x: x if x < 1000 else int(x / 1000)
+        get_id = lambda x: int(x) if x < 1000 else int(x / 1000)
         # 取出所有包含的类型
         block_elem, block_elem_count = torch.unique(instance_block, return_counts=True)
         block_elem, block_elem_count = tuple(block_elem), tuple(block_elem_count)
+        # 类型集合, 并将类型转换为int
         block_elem_type = set(map(get_id, block_elem))
         intersection = None
         # 取出该格中最高遮挡级别的分类
@@ -253,12 +253,13 @@ class CitySpaceDataset(Dataset):
                 break
         # 取出该格中这些分类的全部实例, 统计各个实例在该格中的像素数
         assert intersection is not None
-        label_id = (34, 0)  # id, pixel num
+        label_id = (34, -1)  # id, pixel num
         for i, elem in enumerate(block_elem):
             if get_id(elem) in intersection:
                 pixel_num = block_elem_count[i]
                 if pixel_num > label_id[1]:
                     label_id = (elem, pixel_num)
+
         return label_id[0]
 
     def get_block_ground_truth(self, instance: torch.Tensor, edge: torch.Tensor) -> torch.Tensor:
@@ -282,9 +283,8 @@ class CitySpaceDataset(Dataset):
                 # 归一化 ny nx 到 [-1, 1] 对应于 [0, block_width] 或 [0, block_height]
                 ny = ny * 2 / block_height - 1
                 nx = nx * 2 / block_width - 1
-                block_label = 34  # 34 是数据集中不存在的一个值
-                if has_edge:
-                    block_label = CitySpaceDataset.get_block_instance(instance_block)
+                # block_label = 34  # 34 是数据集中不存在的一个值
+                block_label = CitySpaceDataset.get_block_instance(instance_block)
                 block_gt[:, int(y / block_height), int(x / block_width)] = \
                     torch.tensor((1 if has_edge else 0, ny, nx, block_label),
                                  dtype=torch.float,
@@ -303,6 +303,7 @@ class CitySpaceDataset(Dataset):
 
         random.seed(seed)
         image: torch.Tensor = self.transform(Image.open(self.data[index]))
+        # edge 从 0->1, 但并不严格等于0或1
         edge: torch.Tensor = torch.from_numpy(CitySpaceDataset._get_edge(gt.numpy()[0, :, :])).float()
         edge = edge.unsqueeze(0)
         block_gt = self.get_block_ground_truth(gt, edge)

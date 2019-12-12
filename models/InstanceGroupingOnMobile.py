@@ -49,22 +49,6 @@ class InstanceGrouping(torch.nn.Module):
         )
 
         # 区块特征提取
-        # self.edge_region_feature = nn.Sequential(
-        #     # 600 * 800
-        #     nn.Conv2d(6, 24, 1, bias=False),
-        #     InvertedResidual(24, 24, 1, 2),
-        #     # 600 * 800
-        #     nn.Conv2d(24, 32, 3, stride=2, padding=1),
-        #     # 300 * 400
-        #     nn.Conv2d(32, 48, 3, stride=2, padding=1),
-        #     # 150 * 200
-        #     nn.Conv2d(48, 64, 3, stride=2, padding=1),
-        #     # 64 * 75 * 100
-        #     nn.BatchNorm2d(64),
-        #     nn.ReLU6(inplace=True),
-        # )
-
-        # 区块特征提取
         self.edge_region_feature = nn.Sequential(
             # 300 * 400
             nn.Conv2d(536, 640, 1, bias=False),
@@ -92,21 +76,19 @@ class InstanceGrouping(torch.nn.Module):
         # GCN处理, 内部包含init, 不需要显示init
         self.node_feature_grouping = nn.Sequential(
             # 2000, 64 + 64 * 8 * 8 = 4160
+            nn.ReLU6(inplace=True),
             GraphConvolution(2000, 1024, 512),
+            nn.BatchNorm1d(2000),
             GraphConvolution(2000, 512, 512),
+            nn.ReLU6(inplace=True),
             GraphConvolution(2000, 512, 256),
             # 2000, 256
         )
-        # self.node_feature_grouping_0 = GraphConvolution(2000, 4160, 1024)
-        # self.node_feature_grouping_1 = GraphConvolution(2000, 1024, 1024)
-        # self.node_feature_grouping_2 = GraphConvolution(2000, 4160, 256)
 
         self._initialize_weights(self.fuse_conv, *self.mobile_outputs_convs, self.edge_region_feature,
                                  self.edge_region_predict, self.node_feature_grouping)
 
     def forward(self, x):
-        # b,c,h,w
-
         # mobile block
         mobile_net_v2_output0 = self.mobile_net_v2_b0(x)
         mobile_net_v2_output1 = self.mobile_net_v2_b1(mobile_net_v2_output0)
@@ -136,15 +118,6 @@ class InstanceGrouping(torch.nn.Module):
 
         # 区块特征 b, 64, 75, 100
         edge_region_feature = self.edge_region_feature(feature_map)
-
-        # 边缘特征图转节点特征, 使用先行后列的遍历方式, 将64个通道上每8*8大小区块的数据展平作为特征
-        # feature_map 64 * 600 * 800 -> backend_node_feature 7500 * (64 * 8 * 8)
-        # block_size = 8
-        # backend_node_feature = torch.cat(
-        #     tuple(feature_map[:, :, y:y + block_size, x:x + block_size]
-        #           .reshape(feature_map.shape[0], 1, feature_map.shape[1] * block_size * block_size)
-        #           for x in range(0, 800, block_size) for y in range(0, 600, block_size)),
-        #     dim=1)  # b, n, f
 
         # 区块预测网络, b, 3 * 75 * 100, has_edge, py, px
         edge_region_predict = torch.sigmoid(self.edge_region_predict(edge_region_feature))
@@ -182,33 +155,13 @@ class InstanceGrouping(torch.nn.Module):
         # b *  0  +  -  -
         # c *  +  0  -  -
         # 处理完成后通过[:, :, adjacent_map_width:]取出feature
+        node_feature_grouping_inp = torch.cat((adjacent_map, node_map), dim=2)
         node_output_feature = self.node_feature_grouping(
-            torch.cat((adjacent_map, node_map), dim=2))
-        node_output_feature = node_output_feature[:, :, adjacent_map.shape[1]:]
-        print("node_output_feature", node_output_feature.shape, node_output_feature[0, 0, 0])
+            node_feature_grouping_inp)
+
+        node_output_feature = torch.sigmoid(node_output_feature[:, :, adjacent_map.shape[1]:])
         return (*edge_outputs, edge_region_predict, sorted_topk_index,
                 node_output_feature)
-
-    @staticmethod
-    def binary_cross_entropy_loss(input: torch.Tensor, target: torch.Tensor):
-        """
-        计算边缘损失
-        :param input: b, 1, w, h
-        :param target: b, 1, w, h
-        :return:
-        """
-        pos_index = (target > 0)
-        neg_index = (target == 0)
-
-        pos_num = pos_index.sum().type(torch.float)
-        neg_num = neg_index.sum().type(torch.float)
-        sum_num = pos_num + neg_num
-
-        # 计算每个样本点的损失权重
-        weight = torch.empty(target.size()).to(input.device)
-        weight[pos_index] = neg_num / sum_num
-        weight[neg_index] = pos_num / sum_num
-        return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')
 
     def batch_binary_cross_entropy_loss(self, input: torch.Tensor, target: torch.Tensor):
         """
@@ -217,8 +170,8 @@ class InstanceGrouping(torch.nn.Module):
         :param target: b, 1, w, h
         :return:
         """
-        pos_index = (target > 0)
-        neg_index = (target == 0)
+        pos_index = (target >= 0.5)
+        neg_index = (target < 0.5)
         sum_num = input.shape[2] * input.shape[3]
         # 逐样本计算正负样本数
         pos_num = pos_index.view(input.shape[0], sum_num).sum(dim=1).type(torch.float)
@@ -229,10 +182,12 @@ class InstanceGrouping(torch.nn.Module):
         pos_num = (pos_num.view(input.shape[0], 1, 1, 1) / sum_num).expand(*input.shape).clone()
 
         # 计算每个样本点的损失权重 正样本点权重为 负样本/全样本 负样本点权重 正样本/全样本
-        pos_num[pos_index] = neg_num[neg_index] = 0
+        pos_num[pos_index] = 0
+        neg_num[neg_index] = 0
         weight = (pos_num + neg_num) / sum_num
         return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='mean')
-        # return torch.nn.CrossEntropyLoss(weight)(input, target)
+        # print(weight.squeeze(dim=1).shape, input.squeeze(dim=1).shape, target.squeeze(dim=1).shape)
+        # return torch.nn.CrossEntropyLoss(weight.squeeze(dim=1), reduction='mean')(input.squeeze(dim=1), target.squeeze(dim=1).long())
 
     def block_position_loss(self, input: torch.Tensor, target: torch.Tensor):
         """
@@ -243,9 +198,11 @@ class InstanceGrouping(torch.nn.Module):
         """
         dist = (input - target).pow(2)
         dist = dist[:, 0, :, :] + dist[:, 1, :, :]
-        return dist.sum()
+        return dist.sum() / input.shape[0] / input.shape[2] / input.shape[3]
 
-    def node_grouping_loss(self, indices: torch.Tensor, inputs: torch.Tensor, types: torch.Tensor, alpha=1, beta=0.02,
+    def node_grouping_loss(self, indices: torch.Tensor, nodes_feature: torch.Tensor, instances_map: torch.Tensor,
+                           alpha=1,
+                           beta=0.02,
                            gamma=0.1):
         """
         计算对于每一格block边缘位置损失
@@ -253,8 +210,8 @@ class InstanceGrouping(torch.nn.Module):
         @param beta: 内类间距和类间间距的权重
         @param alpha: 约束到负样本的距离比到正样本的距离大alpha
         @param indices: b, 2000
-        @param inputs: b, 2000, 256
-        @param types: b, 1, 75, 100 每格类型的标注
+        @param nodes_feature: b, 2000, 256
+        @param instances_map: b, 1, 75, 100 每格类型的标注
         @return: loss, a number
         """
 
@@ -278,41 +235,46 @@ class InstanceGrouping(torch.nn.Module):
         # 2. 计算 b到c 的距离 +
         for i in range(1, dist_map.shape[2]):
             dist_map[:, i - 1, i:map_length] = dist_map[:, i:map_length, i - 1] = (
-                    inputs[:, i:map_length, :] - inputs[:, i - 1:i, :]
+                    nodes_feature[:, i:map_length, :] - nodes_feature[:, i - 1:i, :]
             ).pow(2).sum(dim=2)
 
         for batch, index in enumerate(indices):
-            inp = inputs[batch]
-            typ = types[batch, 0]
+            # inp = nodes_feature[batch]
+            ins = instances_map[batch, 0]
             dist = dist_map[batch]
-            node_sets = {int(t): [] for t in typ.unique()}
+            # 每组包含n个node的index, index 为node在2000个nodes中的顺序，用于在dist_map中索引该node
+            node_sets = {int(t): [] for t in ins.unique()}
             # 将node分组
             for i, pos in enumerate(index):
                 # 行坐标y, 列坐标x, pos 是 long 型 不需要 .floor()
-                y, x = pos / types.shape[3], (pos % types.shape[3])
-                node_sets[int(typ[y, x])].append(inp[i])
+                y, x = pos / instances_map.shape[3], (pos % instances_map.shape[3])
+                node_sets[int(ins[y, x])].append(i)
+
             # 计算每个batch中每组的triple let loss
-            perbatch_triplet_losses = []
-            for _k, node_set in node_sets:
+            batch_triplet_losses = []
+
+            # 不一定每个instances id 都有内容
+            for this_ins, node_set in filter(lambda kv: len(kv[1]) > 0, node_sets.items()):
                 # 取出其他组的nodes
-                other_group_nodes = set()
-                for k, node_set in filter(lambda k, v: k != _k, node_sets):
-                    other_group_nodes = other_group_nodes.union(node_set)
-                other_group_nodes = tuple(other_group_nodes)
-                node_set = tuple(node_set)
+                # node_set = tuple(node_set)
+                other_group_nodes = tuple(set(range(2000)) - set(node_set))
+                # for _k, that_node_set in filter(lambda kv: kv[0] != this_ins, node_sets.items()):
+                #     other_group_nodes = other_group_nodes.union(that_node_set)
+                # other_group_nodes = tuple(other_group_nodes)
+
                 # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
-                negative, negative_index = dist[node_set, :][:, other_group_nodes].view(-1).min()
+                negative, negative_index = dist[node_set, :][:, other_group_nodes].view(-1).min(dim=0)
                 negative_x = int(negative_index) % len(other_group_nodes)
                 # 找到同组的最大间距, 并且获取
-                positive, positive_index = dist[node_set, :][:, node_set].view(-1).max()
+                positive, positive_index = dist[node_set, :][:, node_set].view(-1).max(dim=0)
                 positive_y = math.floor(positive_index / len(node_set))
                 # 正负样本间距
                 pn_dist = dist[node_set, :][:, other_group_nodes][positive_y, negative_x]
                 # triplet loss, https://link.springer.com/chapter/10.1007/978-3-319-48890-5_49
                 loss = torch.relu(positive - 0.5 * (negative + pn_dist) + alpha) + beta * torch.relu(positive - gamma)
-                perbatch_triplet_losses.append(loss)
+                batch_triplet_losses.append(loss)
+            triplet_loss[batch] = sum(batch_triplet_losses) / len(node_sets)
 
-            triplet_loss[batch] = sum(perbatch_triplet_losses) / len(node_sets)
         return triplet_loss.sum() / triplet_loss.shape[0]
 
     def get_mobiel_block(self):
