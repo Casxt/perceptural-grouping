@@ -57,7 +57,7 @@ class InstanceGrouping(torch.nn.Module):
             # 2000, 512
             nn.ReLU6(inplace=True),
             GraphConvolution(2000, 512, 128),
-            nn.InstanceNorm1d(2000)
+            # nn.InstanceNorm1d(2000)
             # nn.BatchNorm1d(2000),
             # GraphConvolution(2000, 128, 128),
             # 2000, 128
@@ -80,13 +80,15 @@ class InstanceGrouping(torch.nn.Module):
         # 特征 up to 150 * 200
         h, w = x.size()[2:4]
         feature_map_list = tuple(
-            map(lambda f: nn.functional.interpolate(f, size=(int(h / 4), int(w / 4)), mode="bilinear"), mobile_outputs))
+            map(lambda f: nn.functional.interpolate(f, size=(int(h / 4), int(w / 4)), mode="bilinear",
+                                                    align_corners=False), mobile_outputs))
 
         feature_map = torch.cat(feature_map_list, 1)  # 536 * 150 * 200
 
         # 边缘 up to 600 * 800
         edge_fuse_output = torch.sigmoid(
-            self.fuse_conv(nn.functional.interpolate(feature_map, size=(int(h), int(w)))))
+            self.fuse_conv(
+                nn.functional.interpolate(feature_map, size=(int(h), int(w)), mode="bilinear", align_corners=False)))
 
         # 区块特征 b, 512, 75, 100
         edge_region_feature = self.edge_region_feature(feature_map)
@@ -133,8 +135,10 @@ class InstanceGrouping(torch.nn.Module):
         node_output_feature = self.node_feature_grouping(
             node_feature_grouping_inp)
 
-        # 归一化到 -1 到 1
+        # 取出 feature
         node_output_feature = node_output_feature[:, :, adjacent_map.shape[1]:]
+        # 压缩
+        node_output_feature = nn.InstanceNorm1d(2000)(node_output_feature)
         return (edge_fuse_output, edge_region_predict, sorted_topk_index,
                 node_output_feature)
 
@@ -175,78 +179,6 @@ class InstanceGrouping(torch.nn.Module):
         dist = dist[:, 0, :, :] + dist[:, 1, :, :]
         return dist.sum() / input.shape[0] / input.shape[2] / input.shape[3]
 
-    def node_grouping_loss(self, indices: torch.Tensor, nodes_feature: torch.Tensor, instances_map: torch.Tensor,
-                           alpha=1,
-                           beta=0.02,
-                           gamma=0.1):
-        """
-        计算对于每一格block边缘位置损失
-        @param gamma: 约束正样本间距
-        @param beta: 内类间距和类间间距的权重
-        @param alpha: 约束到负样本的距离比到正样本的距离大alpha
-        @param indices: b, 2000
-        @param nodes_feature: b, 2000, 256
-        @param instances_map: b, 1, 75, 100 每格类型的标注
-        @return: loss, a number
-        """
-
-        # 距离矩阵 兼 邻接矩阵 b, 2000, 2000
-        dist_map = (torch.zeros(indices.shape[0],
-                                indices.shape[1],
-                                indices.shape[1],
-                                requires_grad=False)
-                    .to(indices.device))
-
-        triplet_loss = torch.empty(indices.shape[0]).to(indices.device)
-
-        map_length = dist_map.shape[2]
-        # 生成表示点间距离的对称矩阵
-        # 生成表示点间距离的对称矩阵
-        #   a  b  c
-        # a 0  *  *
-        # b *  0  +
-        # c *  +  0
-        # 1. 计算 a到 b, c 的距离 *
-        # 2. 计算 b到c 的距离 +
-        for i in range(1, dist_map.shape[2]):
-            dist_map[:, i - 1, i:map_length] = dist_map[:, i:map_length, i - 1] = (
-                    nodes_feature[:, i:map_length, :] - nodes_feature[:, i - 1:i, :]
-            ).pow(2).sum(dim=2)
-
-        for batch, index in enumerate(indices):
-            # inp = nodes_feature[batch]
-            ins = instances_map[batch, 0]
-            dist = dist_map[batch]
-            # 每组包含n个node的index, index 为node在2000个nodes中的顺序，用于在dist_map中索引该node
-            node_sets = {int(t): [] for t in ins.unique()}
-            # 将node分组
-            for i, pos in enumerate(index):
-                # 行坐标y, 列坐标x, pos 是 long 型 不需要 .floor()
-                y, x = pos / instances_map.shape[3], (pos % instances_map.shape[3])
-                node_sets[int(ins[y, x])].append(i)
-
-            # 计算每个batch中每组的triple let loss
-            batch_triplet_losses = []
-
-            # 不一定每个instances id 都有内容
-            for this_ins, node_set in filter(lambda kv: 0 < len(kv[1]) < 1999, node_sets.items()):
-                # 取出其他组的nodes
-                other_group_nodes = tuple(set(range(2000)) - set(node_set))
-                # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
-                negative, negative_index = dist[node_set, :][:, other_group_nodes].view(-1).min(dim=0)
-                negative_x = int(negative_index) % len(other_group_nodes)
-                # 找到同组的最大间距, 并且获取
-                positive, positive_index = dist[node_set, :][:, node_set].view(-1).max(dim=0)
-                positive_y = math.floor(positive_index / len(node_set))
-                # 正负样本间距
-                pn_dist = dist[node_set, :][:, other_group_nodes][positive_y, negative_x]
-                # triplet loss, https://link.springer.com/chapter/10.1007/978-3-319-48890-5_49
-                loss = torch.relu(positive - 0.5 * (negative + pn_dist) + alpha) + beta * torch.relu(positive - gamma)
-                batch_triplet_losses.append(loss)
-            triplet_loss[batch] = sum(batch_triplet_losses) / len(node_sets)
-
-        return triplet_loss.sum() / triplet_loss.shape[0], dist_map
-
     def node_grouping_loss_v2(self, indices: torch.Tensor, nodes_feature: torch.Tensor, instances_map: torch.Tensor,
                               alpha=1,
                               beta=0.02,
@@ -257,7 +189,7 @@ class InstanceGrouping(torch.nn.Module):
         @param beta: 内类间距和类间间距的权重
         @param alpha: 约束到负样本的距离比到正样本的距离大alpha
         @param indices: b, 2000
-        @param nodes_feature: b, 2000, 256
+        @param nodes_feature: b, 2000, 128
         @param instances_map: b, 1, 75, 100 每格类型的标注
         @return: loss, a number
         """
@@ -305,11 +237,11 @@ class InstanceGrouping(torch.nn.Module):
                 # 取出其他组的nodes
                 other_group_nodes = tuple(set(range(2000)) - set(node_set))
                 # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
-                negative = dist[node_set, :][:, other_group_nodes] - 1.2
-                negative_loss = negative[negative < 0].sum() * -1
+                negative = dist[node_set, :][:, other_group_nodes] - 2
+                negative_loss = negative[negative < 0].sum() * -1 / negative.nelement()
                 # 找到同组的最大间距, 并且获取
-                positive = dist[node_set, :][:, node_set] - 1
-                positive_loss = positive[positive > 0].sum()
+                positive = dist[node_set, :][:, node_set] - 0.5
+                positive_loss = positive[positive > 0].sum() / positive.nelement()
                 batch_triplet_losses.append(positive_loss + negative_loss)
             triplet_loss[batch] = sum(batch_triplet_losses) / len(node_sets)
 

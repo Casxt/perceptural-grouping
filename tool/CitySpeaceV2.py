@@ -223,7 +223,7 @@ class CitySpaceDataset(Dataset):
         # 取出非边缘， 边缘值会接近1
         no_edge_mask = edge_block < 0.5
         # 如果小块中没有边缘, 不检测其id
-        if no_edge_mask.sum() == no_edge_mask.numel():
+        if no_edge_mask.nelement() - int(no_edge_mask.sum()) > 16:
             return False, (w - 1) / 2, (h - 1) / 2
         dist = get_distance_mat()
         dist[no_edge_mask] = 65535

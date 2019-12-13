@@ -53,15 +53,14 @@ def generator_img_by_node_feature(indeces: torch.Tensor, nodes_feature: torch.Te
         for node_index in node_set:
             index = int(indeces[node_index])
             # 基本坐标
-            ny, nx = (math.floor(index / 100)) * 8, (index % 100) * 8
+            ny, nx = (math.floor(index / 100)), (index % 100)
             # 偏移量
             by, bx = float(node_prop[1, ny, nx]), float(node_prop[2, ny, nx])
             by = (by + 1) / 2 * 8
             bx = (bx + 1) / 2 * 8
-            y, x = round(ny + by), round(nx + bx)
-            img[y - 1:y + 1, x - 1:x + 1] = i
+            y, x = round(ny * 8 + by), round(nx * 8 + bx)
+            img[y - 1:y + 1, x - 1:x + 1] = i + 1
     buf = BytesIO()
-    imsave(buf, img.numpy(), format='jpeg')
+    imsave(buf, img.numpy(), format='bmp')
     pil_im = Image.open(buf, 'r')
     return transforms.ToTensor()(pil_im).to(indeces.device)
-
