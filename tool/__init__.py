@@ -6,7 +6,6 @@ from io import BytesIO
 
 from PIL import Image
 from matplotlib.pyplot import imsave
-import numpy as np
 from torchvision.transforms import transforms
 
 

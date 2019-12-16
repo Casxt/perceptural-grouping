@@ -35,7 +35,7 @@ class InstanceGrouping(torch.nn.Module):
             # 150 * 200
             nn.Conv2d(536, 256, 1, bias=False),
             InvertedResidual(256, 512, 2, 2),
-            # 1024 * 75 * 100
+            # 512 * 75 * 100
             InvertedResidual(512, 512, 1, 2),
             # 512 * 75 * 100
         )
@@ -55,10 +55,8 @@ class InstanceGrouping(torch.nn.Module):
         self.node_feature_grouping = nn.Sequential(
             # 2000, 512
             nn.ReLU6(inplace=True),
-            GraphConvolution(2000, 512, 128),
-            # nn.InstanceNorm1d(2000)
-            # nn.BatchNorm1d(2000),
-            # GraphConvolution(2000, 128, 128),
+            GraphConvolution(2000, 512, 128, batch_normal=True),
+            GraphConvolution(2000, 128, 128, batch_normal=True),
             # 2000, 128
         )
 
@@ -136,8 +134,7 @@ class InstanceGrouping(torch.nn.Module):
 
         # 取出 feature
         node_output_feature = node_output_feature[:, :, adjacent_map.shape[1]:]
-        # 压缩
-        node_output_feature = nn.InstanceNorm1d(2000)(node_output_feature)
+
         return (edge_fuse_output, edge_region_predict, sorted_topk_index,
                 node_output_feature)
 
@@ -179,14 +176,12 @@ class InstanceGrouping(torch.nn.Module):
         return dist.sum() / input.shape[0] / input.shape[2] / input.shape[3]
 
     def node_grouping_loss_v2(self, indices: torch.Tensor, nodes_feature: torch.Tensor, instances_map: torch.Tensor,
-                              alpha=1,
-                              beta=0.02,
-                              gamma=0.1):
+                              alpha=0.5,
+                              beta=2):
         """
         计算对于每一格block边缘位置损失
-        @param gamma: 约束正样本间距
-        @param beta: 内类间距和类间间距的权重
-        @param alpha: 约束到负样本的距离比到正样本的距离大alpha
+        @param beta: 约束负样本间距
+        @param alpha: 约束正样本间距
         @param indices: b, 2000
         @param nodes_feature: b, 2000, 128
         @param instances_map: b, 1, 75, 100 每格类型的标注
@@ -236,10 +231,10 @@ class InstanceGrouping(torch.nn.Module):
                 # 取出其他组的nodes
                 other_group_nodes = tuple(set(range(2000)) - set(node_set))
                 # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
-                negative = dist[node_set, :][:, other_group_nodes] - 2
+                negative = dist[node_set, :][:, other_group_nodes] - beta
                 negative_loss = negative[negative < 0].sum() * -1 / negative.nelement()
                 # 找到同组的最大间距, 并且获取
-                positive = dist[node_set, :][:, node_set] - 0.5
+                positive = dist[node_set, :][:, node_set] - alpha
                 positive_loss = positive[positive > 0].sum() / positive.nelement()
                 batch_triplet_losses.append(positive_loss + negative_loss)
             triplet_loss[batch] = sum(batch_triplet_losses) / len(node_sets)
@@ -296,12 +291,13 @@ class InstanceGrouping(torch.nn.Module):
                     torch.pow(row[:, i:map_length] - row[:, i - 1:i], 2) +
                     torch.pow(col[:, i:map_length] - col[:, i - 1:i], 2)
             )
-        # 点间距离小于 4格对角线长5.656, 3格对角线长4.242, 同时将0-5的范围留空
-        adjacent_map[adjacent_map < 5 ** 2] = 0
+        # 点间距离小于 4格对角线长5.656, 3格对角线长4.242,8格对角线长8.4, 同时将0-5的范围留空
+        adjacent_map[adjacent_map < 4 ** 2] = 0
+        adjacent_map[adjacent_map < 8.5 ** 2] = 0.4
         # 10格对角线长14.14121, 同时将1-14.5的范围留空
-        adjacent_map[adjacent_map < 14.5 ** 2] = 0.5
+        # adjacent_map[adjacent_map < 14.5 ** 2] = 0.5
         # 15格对角线长21.2132, 同时将1-21.5的范围留空
-        adjacent_map[adjacent_map < 21.5 ** 2] = 0.8
+        # adjacent_map[adjacent_map < 21.5 ** 2] = 0.8
         # 其他
         adjacent_map[adjacent_map >= 21 ** 2] = 1.
         # 翻转, 使距离为0的点权重为1, 以此类推
@@ -359,18 +355,22 @@ class InvertedResidual(nn.Module):
 
 class GraphConvolution(nn.Module):
 
-    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float):
+    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float,
+                 batch_normal=True):
         super().__init__()
         # shapes
         self.graph_num = node_num
         self.input_feature_num = input_feature_num
         self.output_feature_num = output_feature_num
         self.add_bias = add_bias
+        self.batch_normal = batch_normal
 
         # params
         self.weight = nn.Parameter(torch.zeros(input_feature_num, self.output_feature_num, dtype=dtype))
         self.bias = nn.Parameter(torch.zeros(self.graph_num, self.output_feature_num, dtype=dtype))
 
+        if batch_normal:
+            self.norm = nn.InstanceNorm1d(node_num)
         # init params
         self.params_reset()
 
@@ -396,4 +396,8 @@ class GraphConvolution(nn.Module):
         # short cut
         if self.input_feature_num == self.output_feature_num:
             x = x + node_feature
+
+        if self.batch_normal:
+            x = self.norm(x)
+
         return torch.cat((adjacent, x), dim=2)

@@ -82,19 +82,14 @@ class CitySpaceDataset(Dataset):
         transforms.Lambda(
             lambda img: torchvision.transforms.functional.crop(img, 6, 7, 836, 2035)
         ),
-        # transforms.Resize((800, 1600)),
-        # transforms.CenterCrop((836, 2035)),
         transforms.RandomCrop((600, 800)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
     targetTransform = transforms.Compose([
         transforms.Lambda(
             lambda img: torchvision.transforms.functional.crop(img, 6, 7, 836, 2035)
         ),
-        # transforms.Resize((800, 1600)),
-        # transforms.CenterCrop((836, 2035)),
         transforms.RandomCrop((600, 800)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
@@ -105,6 +100,8 @@ class CitySpaceDataset(Dataset):
         transforms.RandomCrop((400, 600)),
         transforms.RandomHorizontalFlip()
     ])
+
+    normTransform = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 
     labels = [
         #       name                     id    trainId   category            catId     hasInstances   ignoreInEval   color
@@ -222,8 +219,8 @@ class CitySpaceDataset(Dataset):
         c, h, w = edge_block.shape
         # 取出非边缘， 边缘值会接近1
         no_edge_mask = edge_block < 0.5
-        # 如果小块中边缘像素小于4, 不检测其id
-        if no_edge_mask.nelement() - int(no_edge_mask.sum()) > 4:
+        # 如果小块中边缘像素小于4, 认为其没有边缘
+        if no_edge_mask.nelement() - int(no_edge_mask.sum()) < 4:
             return False, (w - 1) / 2, (h - 1) / 2
         dist = get_distance_mat()
         dist[no_edge_mask] = 65535
@@ -307,5 +304,5 @@ class CitySpaceDataset(Dataset):
         edge: torch.Tensor = torch.from_numpy(CitySpaceDataset._get_edge(gt.numpy()[0, :, :])).float()
         edge = edge.unsqueeze(0)
         block_gt = self.get_block_ground_truth(gt, edge)
-        return image, gt, edge, block_gt
+        return self.normTransform(image), gt, edge, block_gt, image
         # return image(3, 600, 800), gt(1, 600, 800), edge(1, 600, 800), block_gt(4, 75, 100)
