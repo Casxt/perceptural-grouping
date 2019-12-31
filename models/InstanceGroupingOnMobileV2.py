@@ -53,11 +53,9 @@ class InstanceGrouping(torch.nn.Module):
             # self.node_num, 512
             GraphConvolution(self.node_num, 2144, 512, batch_normal=False, add_bias=False),
             nn.ReLU6(inplace=True),
-            GraphConvolution(self.node_num, 512, 512, batch_normal=True),
-            GraphConvolution(self.node_num, 512, 256, batch_normal=False),
+            InvertedGraphConvolution(512, 1024, 512),
             nn.ReLU6(inplace=True),
-            GraphConvolution(self.node_num, 256, 256, batch_normal=False),
-            GraphConvolution(self.node_num, 256, 256, batch_normal=True),
+            GraphConvolution(self.node_num, 512, 256, batch_normal=False),
             # self.node_num, 128
         )
 
@@ -354,6 +352,27 @@ class InvertedResidual(nn.Module):
             return x + self.conv(x)
         else:
             return self.conv(x)
+
+
+class InvertedGraphConvolution(nn.Module):
+    def __init__(self, node_num, input_feature_num, mid_feature_num, output_feature_num):
+        super().__init__()
+        # shapes
+        self.graph_num = node_num
+        self.input_feature_num = input_feature_num
+        self.output_feature_num = output_feature_num
+        self.layer = nn.Sequential(
+            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=False, batch_normal=False),
+            GraphConvolution(node_num, mid_feature_num, mid_feature_num, batch_normal=False),
+            GraphConvolution(node_num, input_feature_num, output_feature_num, batch_normal=True)
+        )
+
+    def forward(self, inp: torch.Tensor):
+        x = self.layer(inp)
+        if self.input_feature_num == self.output_feature_num:
+            b, g, t = inp.shape
+            x[:, :, 0:g] += inp[:, :, 0:g]
+        return x
 
 
 class GraphConvolution(nn.Module):
