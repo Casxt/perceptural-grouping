@@ -1,9 +1,8 @@
-import math
-import torch
+from io import BytesIO
 from typing import Collection
 
-from io import BytesIO
-
+import math
+import torch
 from PIL import Image
 from matplotlib.pyplot import imsave
 from torchvision.transforms import transforms
@@ -25,18 +24,19 @@ def to_device(device, *tensors: Collection[torch.Tensor]):
 def generator_img_by_node_feature(indeces: torch.Tensor, nodes_feature: torch.Tensor, node_prop: torch.Tensor,
                                   dist_map: torch.Tensor):
     """
-    @param indeces: 1, 2000
-    @param nodes_feature: 2000, 256
+    node grouping 结果可视化
+    @param indeces: 1, node_num
+    @param nodes_feature: node_num, 256
     @param node_prop: 3, 75, 100 has_edge, y, x
-    @param dist_map: 2000, 2000 dist between node
+    @param dist_map: node_num, node_num dist between node
     @return:
     """
-    img = torch.zeros((600, 800))
+    img = torch.zeros((600, 800), device=indeces.device)
     node_sets = []
     # 分组
     for index, node in enumerate(nodes_feature):
         min_dist_group = None
-        min_dist = 1.
+        min_dist = 0.5
         # 找到距离最近的组
         for node_set in node_sets:
             dist = float(dist_map[node_set, :][:, index].min())
@@ -55,11 +55,62 @@ def generator_img_by_node_feature(indeces: torch.Tensor, nodes_feature: torch.Te
             ny, nx = (math.floor(index / 100)), (index % 100)
             # 偏移量
             by, bx = float(node_prop[1, ny, nx]), float(node_prop[2, ny, nx])
-            by = (by + 1) / 2 * 8
-            bx = (bx + 1) / 2 * 8
+            by = ((by + 1) / 2) * 8
+            bx = ((bx + 1) / 2) * 8
             y, x = round(ny * 8 + by), round(nx * 8 + bx)
-            img[y - 1:y + 1, x - 1:x + 1] = i + 1
+            if 0 < y < 600 and 0 < x < 800:
+                img[y, x] = i + 1
+            else:
+                pass  # print(f"out of bound y={y} x={x}")
+    return render_color(img)
+
+
+def render_raw_img(img: torch.Tensor, node_gt: torch.Tensor, edge_gt: torch.Tensor):
+    """
+    在原图上渲染视觉效果
+    @param img: 3, h, w
+    @param node_gt: 4 , 75 , 100   has_edge, y, x, id
+    @param edge_gt: 1, h, w
+    @return:
+    """
+    edge_img = img + edge_gt.expand(3, -1, -1)
+    img = torch.zeros((600, 800), device=img.device)
+    for y in range(0, 75):
+        for x in range(0, 100):
+            has_edge, by, bx, id = node_gt[:, y, x]
+            by = ((int(by) + 1) / 2) * 8
+            bx = ((int(bx) + 1) / 2) * 8
+            dy, dx = round(y * 8 + by), round(x * 8 + bx)
+            if 0 < y < 600 and 0 < x < 800:
+                img[dy, dx] = id
+    id_mask = (img > 0).expand(3, -1, -1)
+    id_img = render_color(img)
+    edge_img[id_mask] = id_img[id_mask]
+    return edge_img
+
+
+def render_color(input: torch.Tensor):
     buf = BytesIO()
-    imsave(buf, img.numpy(), format='bmp')
+    imsave(buf, input.cpu().numpy(), format='bmp')
     pil_im = Image.open(buf, 'r')
-    return transforms.ToTensor()(pil_im).to(indeces.device)
+    return transforms.ToTensor()(pil_im).to(input.device)
+
+
+def chunk(input: torch.Tensor, num_h, num_w):
+    """
+    pytorch.chunk 在backward的时候会占用太多现存，不要使用
+    @param input: b, c, h, w
+    @param num: how many chunks you need
+    @return: list of chunk line by line
+    """
+    #  b, c, h / num , w
+    b, c, h, w = input.shape
+    if h % num_h != 0 or w % num_w != 0:
+        raise Exception("num_h, num_w 必须可以整除输入的 h, w")
+    h_len, w_len = int(h / num_h), int(w / num_w)
+    chunks = []
+    for y in range(num_h):
+        for x in range(num_w):
+            chunks.append(input[:, :, y * h_len:(y + 1) * h_len, x * w_len:(x + 1) * w_len])
+
+    return chunks

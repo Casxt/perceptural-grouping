@@ -1,7 +1,10 @@
+from typing import List
+
 import torch
 from torch import nn
 from torchvision.models import mobilenet_v2
-from typing import List
+
+from tool import chunk
 
 
 # v2 将register_forward_hook修改为原结构直出
@@ -19,6 +22,7 @@ class InstanceGrouping(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
+        self.node_num = 1200
         self.mobile_blocks = (
             self.mobile_net_v2_b0, self.mobile_net_v2_b1, self.mobile_net_v2_b2, self.mobile_net_v2_b3,
             self.mobile_net_v2_b4,) = self.get_mobiel_block()
@@ -30,40 +34,38 @@ class InstanceGrouping(torch.nn.Module):
             InvertedResidual(16, 1, 1, 2),
         )
 
-        # 区块特征提取
-        self.edge_region_feature = nn.Sequential(
+        # 区块是否包含边缘置信度预测
+        self.edge_region_predict = nn.Sequential(
             # 150 * 200
             nn.Conv2d(536, 256, 1, bias=False),
             InvertedResidual(256, 512, 2, 2),
             # 512 * 75 * 100
             InvertedResidual(512, 512, 1, 2),
             # 512 * 75 * 100
-        )
-
-        # 区块是否包含边缘置信度预测
-        self.edge_region_predict = nn.Sequential(
-            # 64 * 75 * 100
-            InvertedResidual(512, 256, 1, 2),
-            InvertedResidual(256, 128, 1, 2),
-            InvertedResidual(128, 32, 1, 2),
-            InvertedResidual(32, 32, 1, 2),
-            InvertedResidual(32, 3, 1, 2),
+            InvertedResidual(512, 64, 1, 2),
+            InvertedResidual(64, 64, 1, 2),
+            InvertedResidual(64, 3, 1, 2),
             # 3 * 75 * 100
         )
 
         # GCN处理, 内部包含init, 不需要显示init
         self.node_feature_grouping = nn.Sequential(
-            # 2000, 512
+            # self.node_num, 512
+            GraphConvolution(self.node_num, 2144, 512, batch_normal=False, add_bias=False),
             nn.ReLU6(inplace=True),
-            GraphConvolution(2000, 512, 128, batch_normal=True),
-            GraphConvolution(2000, 128, 128, batch_normal=True),
-            # 2000, 128
+            GraphConvolution(self.node_num, 512, 512, batch_normal=True),
+            GraphConvolution(self.node_num, 512, 256, batch_normal=False),
+            nn.ReLU6(inplace=True),
+            GraphConvolution(self.node_num, 256, 256, batch_normal=False),
+            GraphConvolution(self.node_num, 256, 256, batch_normal=True),
+            # self.node_num, 128
         )
 
-        self._initialize_weights(self.fuse_conv, self.edge_region_feature,
+        self._initialize_weights(self.fuse_conv,
                                  self.edge_region_predict, self.node_feature_grouping)
 
     def forward(self, x):
+        batch_size, _c, h, w = x.shape
         # mobile block
         mobile_net_v2_output0 = self.mobile_net_v2_b0(x)
         mobile_net_v2_output1 = self.mobile_net_v2_b1(mobile_net_v2_output0)
@@ -73,46 +75,41 @@ class InstanceGrouping(torch.nn.Module):
 
         mobile_outputs = (mobile_net_v2_output0, mobile_net_v2_output1, mobile_net_v2_output2,
                           mobile_net_v2_output3, mobile_net_v2_output4)
-
         # 特征 up to 150 * 200
-        h, w = x.size()[2:4]
         feature_map_list = tuple(
-            map(lambda f: nn.functional.interpolate(f, size=(int(h / 4), int(w / 4)), mode="bilinear",
-                                                    align_corners=False), mobile_outputs))
+            map(lambda f: nn.functional.interpolate(f, size=(int(h / 4), int(w / 4))),
+                mobile_outputs))
 
-        feature_map = torch.cat(feature_map_list, 1)  # 536 * 150 * 200
+        feature_map = torch.cat(feature_map_list, dim=1)  # 536 * 150 * 200
 
-        # 边缘 up to 600 * 800
+        # 提取边缘 up to 600 * 800
         edge_fuse_output = torch.sigmoid(
             self.fuse_conv(
-                nn.functional.interpolate(feature_map, size=(int(h), int(w)), mode="bilinear", align_corners=False)))
-
-        # 区块特征 b, 512, 75, 100
-        edge_region_feature = self.edge_region_feature(feature_map)
+                nn.functional.interpolate(
+                    torch.cat(
+                        tuple(
+                            map(
+                                lambda f: nn.functional.interpolate(f, size=(h, w)), mobile_outputs
+                            )
+                        ), dim=1
+                    ), size=(int(h), int(w))))
+        )
 
         # 区块预测网络, b, 3 * 75 * 100, has_edge, py, px
-        edge_region_predict = self.edge_region_predict(edge_region_feature)
+        edge_region_predict = self.edge_region_predict(feature_map)
         edge_region_predict[:, 0:1] = torch.sigmoid(edge_region_predict[:, 0:1])
         edge_region_predict[:, 1:3] = torch.tanh(edge_region_predict[:, 1:3])
-        # 区块特征图转节点特征, 使用先行后列的遍历方式, 将64个通道的数据作为特征
-        # edge_region_feature 64 * 75 * 100 -> backend_node_feature 7500 * 64
-        # edge_region_predict_and_feature = torch.cat((edge_region_predict, edge_region_feature), dim=1)
-        block_feature = torch.cat(
-            tuple(edge_region_feature[:, :, y, x]
-                  .reshape(edge_region_feature.shape[0], 1, edge_region_feature.shape[1])
-                  for x in range(0, 100) for y in range(0, 75)),
-            dim=1)  # b, n, f
 
-        # 将边缘网络和区块网络的特征拼接
-        # node_feature = torch.cat((block_feature, backend_node_feature), dim=2)
-        node_feature = block_feature
-
+        node_feature = torch.cat(
+            tuple(map(lambda f: f.reshape(batch_size, 1, -1), chunk(feature_map, int(h / 8), int(w / 8)))),
+            dim=1
+        )  # b, n, f
         # 获得topk的节点id, topk_index (batch, node)
         _topk, topk_index = torch.topk(
-            edge_region_predict[:, 0, :, :].reshape(edge_region_predict.shape[0], -1), k=2000)
+            edge_region_predict[:, 0, :, :].reshape(edge_region_predict.shape[0], -1), k=self.node_num)
 
-        # 对节点index进行排序, sorted_topk_index代表每个样本中边缘置信度最高的2000个点的一维坐标
-        # sorted_topk_index: b, 2000
+        # 对节点index进行排序, sorted_topk_index代表每个样本中边缘置信度最高的 self.node_num 个点的一维坐标
+        # sorted_topk_index: b, self.node_num
         sorted_topk_index, _topk_index_index = topk_index.sort(dim=1)
 
         # 根据sorted_topk_index取出node map
@@ -122,15 +119,14 @@ class InstanceGrouping(torch.nn.Module):
         # 创建邻接图, int包裹shape防止device error
         adjacent_map = self.generate_adjacent_map(sorted_topk_index, edge_region_predict.shape[3])
 
-        # b, 2000, 2000 + 256, adjacent_map和node_map维度不同，需要横向拼接
+        # b, self.node_num, self.node_num + 256, adjacent_map和node_map维度不同，需要横向拼接
         #   a  b  c  f1 f2
         # a 0  *  *  -  -
         # b *  0  +  -  -
         # c *  +  0  -  -
         # 处理完成后通过[:, :, adjacent_map_width:]取出feature
         node_feature_grouping_inp = torch.cat((adjacent_map, node_map), dim=2)
-        node_output_feature = self.node_feature_grouping(
-            node_feature_grouping_inp)
+        node_output_feature = self.node_feature_grouping(node_feature_grouping_inp)
 
         # 取出 feature
         node_output_feature = node_output_feature[:, :, adjacent_map.shape[1]:]
@@ -138,7 +134,7 @@ class InstanceGrouping(torch.nn.Module):
         return (edge_fuse_output, edge_region_predict, sorted_topk_index,
                 node_output_feature)
 
-    def batch_binary_cross_entropy_loss(self, input: torch.Tensor, target: torch.Tensor):
+    def image_edge_loss(self, input: torch.Tensor, target: torch.Tensor):
         """
         计算边缘损失
         :param input: b, 1, w, h
@@ -161,8 +157,15 @@ class InstanceGrouping(torch.nn.Module):
         neg_num[neg_index] = 0
         weight = (pos_num + neg_num) / sum_num
         return torch.nn.functional.binary_cross_entropy(input, target, weight, reduction='sum') / input.shape[0]
-        # print(weight.squeeze(dim=1).shape, input.squeeze(dim=1).shape, target.squeeze(dim=1).shape)
-        # return torch.nn.CrossEntropyLoss(weight.squeeze(dim=1), reduction='mean')(input.squeeze(dim=1), target.squeeze(dim=1).long())
+
+    def node_edge_loss(self, input: torch.Tensor, target: torch.Tensor):
+        """
+        计算节点边缘预测损失
+        :param input: b, 1, w, h
+        :param target: b, 1, w, h
+        :return:
+        """
+        return torch.nn.functional.binary_cross_entropy(input, target, reduction='mean')
 
     def block_position_loss(self, input: torch.Tensor, target: torch.Tensor):
         """
@@ -182,20 +185,20 @@ class InstanceGrouping(torch.nn.Module):
         计算对于每一格block边缘位置损失
         @param beta: 约束负样本间距
         @param alpha: 约束正样本间距
-        @param indices: b, 2000
-        @param nodes_feature: b, 2000, 128
+        @param indices: b, self.node_num
+        @param nodes_feature: b, self.node_num, 128
         @param instances_map: b, 1, 75, 100 每格类型的标注
         @return: loss, a number
         """
 
-        # 距离矩阵 兼 邻接矩阵 b, 2000, 2000
+        # 距离矩阵 兼 邻接矩阵 b, self.node_num, self.node_num
         dist_map = (torch.zeros(indices.shape[0],
                                 indices.shape[1],
                                 indices.shape[1],
-                                requires_grad=False)
-                    .to(indices.device))
+                                requires_grad=False,
+                                device=indices.device))
 
-        triplet_loss = torch.empty(indices.shape[0]).to(indices.device)
+        triplet_loss = torch.empty(indices.shape[0], device=indices.device)
 
         map_length = dist_map.shape[2]
         # 生成表示点间距离的对称矩阵
@@ -215,7 +218,7 @@ class InstanceGrouping(torch.nn.Module):
             # inp = nodes_feature[batch]
             ins = instances_map[batch, 0]
             dist = dist_map[batch]
-            # 每组包含n个node的index, index 为node在2000个nodes中的顺序，用于在dist_map中索引该node
+            # 每组包含n个node的index, index 为node在 self.node_num 个nodes中的顺序，用于在dist_map中索引该node
             node_sets = {int(t): [] for t in ins.unique()}
             # 将node分组
             for i, pos in enumerate(index):
@@ -229,7 +232,7 @@ class InstanceGrouping(torch.nn.Module):
             # 不一定每个instances id 都有内容
             for this_ins, node_set in filter(lambda kv: 0 < len(kv[1]) < 1999, node_sets.items()):
                 # 取出其他组的nodes
-                other_group_nodes = tuple(set(range(2000)) - set(node_set))
+                other_group_nodes = tuple(set(range(self.node_num)) - set(node_set))
                 # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
                 negative = dist[node_set, :][:, other_group_nodes] - beta
                 negative_loss = negative[negative < 0].sum() * -1 / negative.nelement()
@@ -269,14 +272,14 @@ class InstanceGrouping(torch.nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def generate_adjacent_map(self, sorted_topk_index: torch.Tensor, feature_map_width: torch.Size):
-        # 距离矩阵 兼 邻接矩阵 b, 2000, 2000
+        # 距离矩阵 兼 邻接矩阵 b, self.node_num, self.node_num
         adjacent_map = (torch.zeros(sorted_topk_index.shape[0],
                                     sorted_topk_index.shape[1],
                                     sorted_topk_index.shape[1],
-                                    requires_grad=False)
-                        .to(sorted_topk_index.device))
+                                    requires_grad=False,
+                                    device=sorted_topk_index.device))
         # 行坐标y, 列坐标x, 均为tensor, 注意使用.floor()而不是math.floor(), sorted_topk_index 是Long型，不需要floor
-        # b, 2000  b, 2000
+        # b, self.node_num  b, self.node_num
         row, col = (sorted_topk_index / int(feature_map_width)), (sorted_topk_index % int(feature_map_width))
         map_length = int(adjacent_map.shape[2])
         # 生成表示点间距离的对称矩阵
@@ -367,7 +370,10 @@ class GraphConvolution(nn.Module):
 
         # params
         self.weight = nn.Parameter(torch.zeros(input_feature_num, self.output_feature_num, dtype=dtype))
-        self.bias = nn.Parameter(torch.zeros(self.graph_num, self.output_feature_num, dtype=dtype))
+        if add_bias:
+            self.bias = nn.Parameter(torch.zeros(self.graph_num, self.output_feature_num, dtype=dtype))
+        else:
+            self.bias = nn.Parameter(torch.zeros(1, 1, dtype=dtype))
 
         if batch_normal:
             self.norm = nn.InstanceNorm1d(node_num)
