@@ -98,7 +98,7 @@ def render_color(input: torch.Tensor):
 
 def chunk(input: torch.Tensor, num_h, num_w):
     """
-    pytorch.chunk 在backward的时候会占用太多现存，不要使用
+    与 pytorch.chunk 相似, 为了方便修改一些细节
     @param input: b, c, h, w
     @param num: how many chunks you need
     @return: list of chunk line by line
@@ -114,3 +114,4 @@ def chunk(input: torch.Tensor, num_h, num_w):
             chunks.append(input[:, :, y * h_len:(y + 1) * h_len, x * w_len:(x + 1) * w_len])
 
     return chunks
+

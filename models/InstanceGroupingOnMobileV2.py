@@ -4,8 +4,6 @@ import torch
 from torch import nn
 from torchvision.models import mobilenet_v2
 
-from tool import chunk
-
 
 # v2 将register_forward_hook修改为原结构直出
 
@@ -22,7 +20,14 @@ class InstanceGrouping(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.node_num = 1200
+        self.node_num = 1000
+        # mobile_net_v2_b0输出尺寸即为原尺寸的 1 / 4
+        self.feature_map_size_factor = 1 / 4
+        # 从特征图中提取的区块大小
+        self.feature_map_block_size = 3
+        # 区块预测输出尺寸即为原尺寸的 1 / 8
+        self.region_map_size_factor = 1 / 8
+
         self.mobile_blocks = (
             self.mobile_net_v2_b0, self.mobile_net_v2_b1, self.mobile_net_v2_b2, self.mobile_net_v2_b3,
             self.mobile_net_v2_b4,) = self.get_mobiel_block()
@@ -51,19 +56,19 @@ class InstanceGrouping(torch.nn.Module):
         # GCN处理, 内部包含init, 不需要显示init
         self.node_feature_grouping = nn.Sequential(
             # self.node_num, 512
-            GraphConvolution(self.node_num, 2144, 512, batch_normal=False, add_bias=False),
-            nn.ReLU6(inplace=True),
-            InvertedGraphConvolution(512, 1024, 512),
-            nn.ReLU6(inplace=True),
-            GraphConvolution(self.node_num, 512, 256, batch_normal=False),
+            InvertedGraphConvolution(self.node_num, 4824, 4096, 1024),
+            InvertedGraphConvolution(self.node_num, 1024, 2048, 1024),
+            InvertedGraphConvolution(self.node_num, 1024, 2048, 1024),
+            InvertedGraphConvolution(self.node_num, 1024, 512, 256),
             # self.node_num, 128
         )
 
         self._initialize_weights(self.fuse_conv,
-                                 self.edge_region_predict, self.node_feature_grouping)
+                                 self.edge_region_predict)
 
-    def forward(self, x):
+    def forward(self, x, edges, block_gt):
         batch_size, _c, h, w = x.shape
+
         # mobile block
         mobile_net_v2_output0 = self.mobile_net_v2_b0(x)
         mobile_net_v2_output1 = self.mobile_net_v2_b1(mobile_net_v2_output0)
@@ -75,33 +80,37 @@ class InstanceGrouping(torch.nn.Module):
                           mobile_net_v2_output3, mobile_net_v2_output4)
         # 特征 up to 150 * 200
         feature_map_list = tuple(
-            map(lambda f: nn.functional.interpolate(f, size=(int(h / 4), int(w / 4))),
+            map(lambda f: nn.functional.interpolate(f, size=(
+                int(h * self.feature_map_size_factor), int(w * self.feature_map_size_factor))),
                 mobile_outputs))
 
         feature_map = torch.cat(feature_map_list, dim=1)  # 536 * 150 * 200
 
         # 提取边缘 up to 600 * 800
-        edge_fuse_output = torch.sigmoid(
-            self.fuse_conv(
-                nn.functional.interpolate(
-                    torch.cat(
-                        tuple(
-                            map(
-                                lambda f: nn.functional.interpolate(f, size=(h, w)), mobile_outputs
-                            )
-                        ), dim=1
-                    ), size=(int(h), int(w))))
-        )
+        edge_fuse_output = edges
+        # 暂时不训练边缘提取
+        # edge_fuse_output = torch.sigmoid(
+        #     self.fuse_conv(
+        #         nn.functional.interpolate(
+        #             torch.cat(
+        #                 tuple(
+        #                     map(
+        #                         lambda f: nn.functional.interpolate(f, size=(h, w)), mobile_outputs
+        #                     )
+        #                 ), dim=1
+        #             ), size=(int(h), int(w))))
+        # )
 
         # 区块预测网络, b, 3 * 75 * 100, has_edge, py, px
-        edge_region_predict = self.edge_region_predict(feature_map)
-        edge_region_predict[:, 0:1] = torch.sigmoid(edge_region_predict[:, 0:1])
-        edge_region_predict[:, 1:3] = torch.tanh(edge_region_predict[:, 1:3])
-
-        node_feature = torch.cat(
-            tuple(map(lambda f: f.reshape(batch_size, 1, -1), chunk(feature_map, int(h / 8), int(w / 8)))),
-            dim=1
-        )  # b, n, f
+        # 暂时不训练边缘提取
+        # edge_region_predict = self.edge_region_predict(feature_map)
+        # edge_region_predict[:, 0:1] = torch.sigmoid(edge_region_predict[:, 0:1])
+        # edge_region_predict[:, 1:3] = torch.tanh(edge_region_predict[:, 1:3])
+        rand = torch.abs(torch.rand_like(block_gt[:, 0], device=x.device))
+        rand = rand / rand.max() / 10
+        edge_region_predict = block_gt[:, 0:3]
+        edge_region_predict[:, 0] += rand
+        edge_region_predict[:, 0] /= edge_region_predict[:, 0].max()
         # 获得topk的节点id, topk_index (batch, node)
         _topk, topk_index = torch.topk(
             edge_region_predict[:, 0, :, :].reshape(edge_region_predict.shape[0], -1), k=self.node_num)
@@ -111,9 +120,32 @@ class InstanceGrouping(torch.nn.Module):
         sorted_topk_index, _topk_index_index = topk_index.sort(dim=1)
 
         # 根据sorted_topk_index取出node map
-        node_map = torch.cat(
-            tuple(node_feature[batch, indices, :].unsqueeze(0) for batch, indices in enumerate(sorted_topk_index)),
-            0)
+        node_map = torch.empty((batch_size, self.node_num,
+                                feature_map.shape[1] * self.feature_map_block_size * self.feature_map_block_size),
+                               device=x.device)
+        edge_region_h, edge_region_w = edge_region_predict.shape[2:4]
+        for batch, indices in enumerate(sorted_topk_index):
+            for node_index, pos_index in enumerate(indices):
+                # 计算坐标缩放比例
+                factor = self.feature_map_size_factor / self.region_map_size_factor
+                # 计算在 region map 中的区块左上角坐标
+                edge_region_y, edge_region_x = int(pos_index / edge_region_w), int(
+                    pos_index % edge_region_w)
+                # 计算在 feature map 中的区块左中心坐标
+                y = round((edge_region_y + (
+                        float(edge_region_predict[batch, 1, edge_region_y, edge_region_x]) + 1.) / 2.) * factor)
+                x = round((float(edge_region_x) + (
+                        float(edge_region_predict[batch, 2, edge_region_y, edge_region_x]) + 1.) / 2.) * factor)
+                # feature map 中的区块左中心坐标 转换为左上角坐标, 修正坐标使得框选总在 feature map 内部, 此处会有舍入误差
+                y = max(0, y - int(self.feature_map_block_size / 2))
+                x = max(0, x - int(self.feature_map_block_size / 2))
+                if y + self.feature_map_block_size > edge_region_h + 1:
+                    y = edge_region_h + 1 - self.feature_map_block_size
+                if x + self.feature_map_block_size > edge_region_w + 1:
+                    x = edge_region_w + 1 - self.feature_map_block_size
+                node_map[batch, node_index] = feature_map[batch, :, y:y + self.feature_map_block_size,
+                                              x:x + self.feature_map_block_size].reshape(-1)
+
         # 创建邻接图, int包裹shape防止device error
         adjacent_map = self.generate_adjacent_map(sorted_topk_index, edge_region_predict.shape[3])
 
@@ -294,7 +326,7 @@ class InstanceGrouping(torch.nn.Module):
             )
         # 点间距离小于 4格对角线长5.656, 3格对角线长4.242,8格对角线长8.4, 同时将0-5的范围留空
         adjacent_map[adjacent_map < 4 ** 2] = 0
-        adjacent_map[adjacent_map < 8.5 ** 2] = 0.4
+        # adjacent_map[adjacent_map < 8.5 ** 2] = 0.4
         # 10格对角线长14.14121, 同时将1-14.5的范围留空
         # adjacent_map[adjacent_map < 14.5 ** 2] = 0.5
         # 15格对角线长21.2132, 同时将1-21.5的范围留空
@@ -362,16 +394,17 @@ class InvertedGraphConvolution(nn.Module):
         self.input_feature_num = input_feature_num
         self.output_feature_num = output_feature_num
         self.layer = nn.Sequential(
-            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=False, batch_normal=False),
-            GraphConvolution(node_num, mid_feature_num, mid_feature_num, batch_normal=False),
-            GraphConvolution(node_num, input_feature_num, output_feature_num, batch_normal=True)
+            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=False, batch_normal=True),
+            nn.ReLU6(inplace=True),
+            GraphConvolution(node_num, mid_feature_num, mid_feature_num, batch_normal=True),
+            GraphConvolution(node_num, mid_feature_num, output_feature_num, batch_normal=True)
         )
 
     def forward(self, inp: torch.Tensor):
         x = self.layer(inp)
         if self.input_feature_num == self.output_feature_num:
             b, g, t = inp.shape
-            x[:, :, 0:g] += inp[:, :, 0:g]
+            x[:, :, g:t] += inp[:, :, g:t]
         return x
 
 
@@ -388,11 +421,11 @@ class GraphConvolution(nn.Module):
         self.batch_normal = batch_normal
 
         # params
-        self.weight = nn.Parameter(torch.zeros(input_feature_num, self.output_feature_num, dtype=dtype))
+        self.weight = nn.Parameter(torch.empty(input_feature_num, self.output_feature_num, dtype=dtype))
         if add_bias:
-            self.bias = nn.Parameter(torch.zeros(self.graph_num, self.output_feature_num, dtype=dtype))
+            self.bias = nn.Parameter(torch.empty(self.graph_num, self.output_feature_num, dtype=dtype))
         else:
-            self.bias = nn.Parameter(torch.zeros(1, 1, dtype=dtype))
+            self.bias = nn.Parameter(torch.empty(1, 1, dtype=dtype))
 
         if batch_normal:
             self.norm = nn.InstanceNorm1d(node_num)
@@ -419,8 +452,8 @@ class GraphConvolution(nn.Module):
         if self.add_bias:
             x = x + self.bias
         # short cut
-        if self.input_feature_num == self.output_feature_num:
-            x = x + node_feature
+        # if self.input_feature_num == self.output_feature_num:
+        #     x = x + node_feature
 
         if self.batch_normal:
             x = self.norm(x)

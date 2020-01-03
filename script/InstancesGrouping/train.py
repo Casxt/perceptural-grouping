@@ -15,9 +15,9 @@ from models import InstanceGroupingV2 as InstanceGrouping
 # cityspace 数据集， 一切默认
 device = 0
 epochs = 2000
-batchSize = 6
-workernum = 12
-subPath = Path("instance_grouping/fifth_try")
+batchSize = 8
+workernum = 24
+subPath = Path("instance_grouping/sixth_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 
@@ -27,16 +27,15 @@ dataSet = CitySpace(Path("/root/perceptual_grouping/dataset/cityspace"))
 net: InstanceGrouping = InstanceGrouping().cuda(device)
 
 optimizer = torch.optim.RMSprop([
-    {'params': net.mobile_net_v2_b0.parameters(), "lr": 0},
-    {'params': net.mobile_net_v2_b1.parameters(), "lr": 0},
-    {'params': net.mobile_net_v2_b2.parameters(), "lr": 0},
-    {'params': net.mobile_net_v2_b3.parameters(), "lr": 0},
-    {'params': net.mobile_net_v2_b4.parameters(), "lr": 0},
-    # {'params': net.edge_region_feature.parameters()},
-    {'params': net.fuse_conv.parameters()},
-    {'params': net.edge_region_predict.parameters()},
+    # {'params': net.mobile_net_v2_b0.parameters(), "lr": 0},
+    # {'params': net.mobile_net_v2_b1.parameters(), "lr": 0},
+    # {'params': net.mobile_net_v2_b2.parameters(), "lr": 0},
+    # {'params': net.mobile_net_v2_b3.parameters(), "lr": 0},
+    # {'params': net.mobile_net_v2_b4.parameters(), "lr": 0},
+    # {'params': net.fuse_conv.parameters()},
+    # {'params': net.edge_region_predict.parameters()},
     {'params': net.node_feature_grouping.parameters()}
-], lr=5e-3)
+], lr=1e-4)
 
 step, val_step = 0, 0
 for epoch in range(epochs):
@@ -44,7 +43,7 @@ for epoch in range(epochs):
 
     if epoch == 5:
         for p in optimizer.param_groups:
-            p["lr"] = 5e-3
+            p["lr"] = 1e-4
     elif epoch == 15:
         for p in optimizer.param_groups:
             p["lr"] = 1e-3
@@ -56,7 +55,7 @@ for epoch in range(epochs):
     for index, batch in enumerate(train):
         imgs, gts, edges, block_gt, raw_imgs = to_device(device, *batch)
         start_time = time.time()
-        edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs)
+        edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs, edges, block_gt)
         used_time = time.time() - start_time
 
         edge_loss = net.image_edge_loss(edge_predict, edges)
