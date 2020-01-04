@@ -56,10 +56,11 @@ class InstanceGrouping(torch.nn.Module):
         # GCN处理, 内部包含init, 不需要显示init
         self.node_feature_grouping = nn.Sequential(
             # self.node_num, 512
-            InvertedGraphConvolution(self.node_num, 4824, 4096, 1024),
+            InvertedGraphConvolution(self.node_num, 4824, 8192, 2048),
+            InvertedGraphConvolution(self.node_num, 2048, 4096, 2048),
+            InvertedGraphConvolution(self.node_num, 2048, 4096, 1024),
             InvertedGraphConvolution(self.node_num, 1024, 2048, 1024),
-            InvertedGraphConvolution(self.node_num, 1024, 2048, 1024),
-            InvertedGraphConvolution(self.node_num, 1024, 512, 256),
+            InvertedGraphConvolution(self.node_num, 1024, 2048, 128),
             # self.node_num, 128
         )
 
@@ -267,11 +268,19 @@ class InstanceGrouping(torch.nn.Module):
                 # 找到不同组的小于最小间距的点 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
                 negative = this_dist[:, other_group_nodes] - beta
                 negative_mask = (negative < 0)
-                negative_loss = negative[negative_mask].sum() * -1 / negative_mask.sum()
+                negative_mask_sum = negative_mask.sum()
+                if negative_mask_sum > 0:
+                    negative_loss = negative[negative_mask].sum() * -1 / negative_mask_sum
+                else:
+                    negative_loss = 0
                 # 找到同组的大于最大间距的点
                 positive = this_dist[:, node_set] - alpha
                 positive_mask = (positive > 0)
-                positive_loss = positive[positive_mask].sum() / positive_mask.sum()
+                positive_mask_sum = positive_mask.sum()
+                if positive_mask_sum > 0:
+                    positive_loss = positive[positive_mask].sum() / positive_mask_sum
+                else:
+                    positive_loss = 0
                 batch_triplet_losses.append(positive_loss + negative_loss)
             triplet_loss[batch] = sum(batch_triplet_losses)  # / len(node_sets)
 
@@ -398,8 +407,8 @@ class InvertedGraphConvolution(nn.Module):
         self.output_feature_num = output_feature_num
         self.layer = nn.Sequential(
             GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=False, batch_normal=True),
-            nn.ReLU6(inplace=True),
             GraphConvolution(node_num, mid_feature_num, mid_feature_num, batch_normal=True),
+            nn.ReLU6(inplace=True),
             GraphConvolution(node_num, mid_feature_num, output_feature_num, batch_normal=True)
         )
 

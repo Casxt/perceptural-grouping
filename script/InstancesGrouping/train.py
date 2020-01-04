@@ -15,8 +15,8 @@ from models import InstanceGroupingV2 as InstanceGrouping
 # cityspace 数据集， 一切默认
 device = 0
 epochs = 2000
-batchSize = 12
-workernum = 30
+batchSize = 15
+workernum = 36
 subPath = Path("instance_grouping/seventh_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
@@ -68,9 +68,11 @@ for epoch in range(epochs):
                                                                 block_gt[:, 3:4])
         # 只约束edge的fuse层输出
         total_loss = edge_loss + node_edge_loss + node_pos_loss + node_feature_loss
+        loss_time = time.time() - start_time - used_time
 
         print(f"train epoch{epoch}", f"step{index}", f"samples {step % len(train.dataset)}/{len(train.dataset)}",
-              f"spend {format(used_time / len(imgs), '.6f')}s",
+              f"net spend {format(used_time / len(imgs), '.6f')}s",
+              f"loss spend {format(loss_time / len(imgs), '.6f')}s",
               f"loss {format(total_loss, '.9f')}",
               f"edge_loss {format(edge_loss, '.9f')}",
               f"node_edge_loss {format(node_edge_loss, '.9f')}",
@@ -89,7 +91,10 @@ for epoch in range(epochs):
         vis_edge_region_predict = torch.nn.functional.interpolate(
             edge_region_predict[0:1, 0:1].cpu().detach(), size=(600, 800)
         )[0].expand(3, -1, -1)
-
+        # TODO: 添加node_gt可视化
+        # vis_node_gt = render_color(torch.nn.functional.interpolate(
+        #     block_gt[0, 3:4].cpu().detach(), size=(600, 800)
+        # )[0])
         writer.add_image("train_node_vision",
                          torch.cat(
                              (render_raw_img(raw_imgs[0].cpu().detach(), block_gt[0].cpu().detach(),
@@ -126,7 +131,7 @@ for epoch in range(epochs):
             imgs, gts, edges, block_gt, raw_imgs = to_device(device, *batch)
 
             start_time = time.time()
-            edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs)
+            edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs, edges, block_gt)
             used_time = time.time() - start_time
 
             total_time += used_time
@@ -144,9 +149,11 @@ for epoch in range(epochs):
             node_feature_loss, dist_map = net.node_grouping_loss_v2(sorted_topk_index, node_output_feature,
                                                                     block_gt[:, 3:4])
             total_node_feature_loss += node_feature_loss
+            loss_time = time.time() - start_time - used_time
 
             print(f"valid epoch{epoch}", f"val_step{index}", f"val_samples {val_step}/{len(val.dataset)}",
-                  f"spend {format(used_time / len(imgs), '.6f')}s",
+                  f"net spend {format(used_time / len(imgs), '.6f')}s",
+                  f"loss spend {format(loss_time / len(imgs), '.6f')}s",
                   f"loss {format(edge_loss + node_edge_loss + node_pos_loss + node_feature_loss, '.9f')}",
                   f"edge_loss {format(edge_loss, '.9f')}",
                   f"node_edge_loss {format(node_edge_loss, '.9f')}",
@@ -164,6 +171,9 @@ for epoch in range(epochs):
             vis_edge_region_predict = torch.nn.functional.interpolate(
                 edge_region_predict[0:1, 0:1], size=(600, 800)
             )[0].expand(3, -1, -1)
+            # vis_node_gt = render_color(torch.nn.functional.interpolate(
+            #     block_gt[0, 3:4].cpu().detach(), size=(600, 800)
+            # )[0])
             writer.add_image("val_step_node_vision",
                              torch.cat(
                                  (render_raw_img(raw_imgs[0].detach(), block_gt[0].detach(), edges[0].detach()), vis,
