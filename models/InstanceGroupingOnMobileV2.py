@@ -243,7 +243,7 @@ class InstanceGrouping(torch.nn.Module):
             dist_map[:, i - 1, i:map_length] = dist_map[:, i:map_length, i - 1] = (
                     nodes_feature[:, i:map_length, :] - nodes_feature[:, i - 1:i, :]
             ).pow(2).sum(dim=2)
-
+        total_node_set = set(range(self.node_num))
         for batch, index in enumerate(indices):
             # inp = nodes_feature[batch]
             ins = instances_map[batch, 0]
@@ -259,18 +259,21 @@ class InstanceGrouping(torch.nn.Module):
             # 计算每个batch中每组的triple let loss
             batch_triplet_losses = []
 
-            # 不一定每个instances id 都有内容
+            # 不一定每个instances id 都有内容, 筛选出 node_set 长度大于1的 node_set
             for this_ins, node_set in filter(lambda kv: 0 < len(kv[1]) < 1999, node_sets.items()):
                 # 取出其他组的nodes
-                other_group_nodes = tuple(set(range(self.node_num)) - set(node_set))
-                # 找到不同组的最小间距 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
-                negative = dist[node_set, :][:, other_group_nodes] - beta
-                negative_loss = negative[negative < 0].sum() * -1 / negative.nelement()
-                # 找到同组的最大间距, 并且获取
-                positive = dist[node_set, :][:, node_set] - alpha
-                positive_loss = positive[positive > 0].sum() / positive.nelement()
+                other_group_nodes = tuple(total_node_set - set(node_set))
+                this_dist = dist[node_set, :]
+                # 找到不同组的小于最小间距的点 , 注意[node_set, :][:, node_set]不能写成[node_set, node_set]
+                negative = this_dist[:, other_group_nodes] - beta
+                negative_mask = (negative < 0)
+                negative_loss = negative[negative_mask].sum() * -1 / negative_mask.sum()
+                # 找到同组的大于最大间距的点
+                positive = this_dist[:, node_set] - alpha
+                positive_mask = (positive > 0)
+                positive_loss = positive[positive_mask].sum() / positive_mask.sum()
                 batch_triplet_losses.append(positive_loss + negative_loss)
-            triplet_loss[batch] = sum(batch_triplet_losses) / len(node_sets)
+            triplet_loss[batch] = sum(batch_triplet_losses)  # / len(node_sets)
 
         return triplet_loss.sum() / triplet_loss.shape[0], dist_map
 

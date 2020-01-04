@@ -1,17 +1,15 @@
 import os
 import random
-
-import cv2
-import torch
-import numpy as np
+from collections import namedtuple
 from pathlib import Path
 
-from PIL import Image
-from collections import namedtuple
-from torch.utils.data import Dataset
+import cv2
+import numpy as np
+import torch
 import torchvision
+from PIL import Image
+from torch.utils.data import Dataset
 from torchvision.transforms import transforms
-from typing import List, Any, Callable
 
 Label = namedtuple('Label', [
 

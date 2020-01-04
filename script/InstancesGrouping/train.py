@@ -15,8 +15,8 @@ from models import InstanceGroupingV2 as InstanceGrouping
 # cityspace 数据集， 一切默认
 device = 0
 epochs = 2000
-batchSize = 8
-workernum = 24
+batchSize = 12
+workernum = 30
 subPath = Path("instance_grouping/sixth_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
@@ -51,7 +51,7 @@ for epoch in range(epochs):
         for p in optimizer.param_groups:
             p["lr"] = 1e-4
 
-    train = DataLoader(dataSet.get_train(), shuffle=True, pin_memory=True, num_workers=workernum, batch_size=batchSize)
+    train = DataLoader(dataSet.get_train(), shuffle=True, num_workers=workernum, batch_size=batchSize)
     for index, batch in enumerate(train):
         imgs, gts, edges, block_gt, raw_imgs = to_device(device, *batch)
         start_time = time.time()
