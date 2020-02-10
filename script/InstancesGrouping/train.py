@@ -17,7 +17,7 @@ device = 0
 epochs = 2000
 batchSize = 15
 workernum = 36
-subPath = Path("instance_grouping/seventh_try")
+subPath = Path("instance_grouping/eighth_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 
@@ -27,11 +27,11 @@ dataSet = CitySpace(Path("/root/perceptual_grouping/dataset/cityspace"))
 net: InstanceGrouping = InstanceGrouping().cuda(device)
 
 optimizer = torch.optim.RMSprop([
-    # {'params': net.mobile_net_v2_b0.parameters(), "lr": 0},
-    # {'params': net.mobile_net_v2_b1.parameters(), "lr": 0},
-    # {'params': net.mobile_net_v2_b2.parameters(), "lr": 0},
-    # {'params': net.mobile_net_v2_b3.parameters(), "lr": 0},
-    # {'params': net.mobile_net_v2_b4.parameters(), "lr": 0},
+    {'params': net.mobile_net_v2_b0.parameters(), "lr": 0},
+    {'params': net.mobile_net_v2_b1.parameters(), "lr": 0},
+    {'params': net.mobile_net_v2_b2.parameters(), "lr": 0},
+    {'params': net.mobile_net_v2_b3.parameters(), "lr": 0},
+    {'params': net.mobile_net_v2_b4.parameters(), "lr": 0},
     # {'params': net.fuse_conv.parameters()},
     # {'params': net.edge_region_predict.parameters()},
     {'params': net.node_feature_grouping.parameters()}
@@ -53,9 +53,10 @@ for epoch in range(epochs):
 
     train = DataLoader(dataSet.get_train(), shuffle=True, num_workers=workernum, batch_size=batchSize)
     for index, batch in enumerate(train):
-        imgs, gts, edges, block_gt, raw_imgs = to_device(device, *batch)
+        imgs, gts, edges, block_gt, raw_imgs, image_like_edge = to_device(device, *batch)
         start_time = time.time()
-        edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs, edges, block_gt)
+        edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(image_like_edge, edges,
+                                                                                        block_gt)
         used_time = time.time() - start_time
 
         edge_loss = net.image_edge_loss(edge_predict, edges)
@@ -128,10 +129,11 @@ for epoch in range(epochs):
                          batch_size=batchSize)
         total_time, index = 0, 0
         for index, batch in enumerate(val):
-            imgs, gts, edges, block_gt, raw_imgs = to_device(device, *batch)
+            imgs, gts, edges, block_gt, raw_imgs, image_like_edge = to_device(device, *batch)
 
             start_time = time.time()
-            edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs, edges, block_gt)
+            edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(image_like_edge, edges,
+                                                                                            block_gt)
             used_time = time.time() - start_time
 
             total_time += used_time

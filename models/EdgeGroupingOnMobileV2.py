@@ -8,7 +8,7 @@ from torchvision.models import mobilenet_v2
 # v2 将register_forward_hook修改为原结构直出
 
 
-class InstanceGrouping(torch.nn.Module):
+class EdgeGrouping(torch.nn.Module):
     # layers, inChannels, midChannels, outChannels
     mobile_output_layer: List[int] = [[3, 24, 48, 1],
                                       [6, 32, 64, 1],
@@ -89,24 +89,7 @@ class InstanceGrouping(torch.nn.Module):
 
         # 提取边缘 up to 600 * 800
         edge_fuse_output = edges
-        # 暂时不训练边缘提取
-        # edge_fuse_output = torch.sigmoid(
-        #     self.fuse_conv(
-        #         nn.functional.interpolate(
-        #             torch.cat(
-        #                 tuple(
-        #                     map(
-        #                         lambda f: nn.functional.interpolate(f, size=(h, w)), mobile_outputs
-        #                     )
-        #                 ), dim=1
-        #             ), size=(int(h), int(w))))
-        # )
 
-        # 区块预测网络, b, 3 * 75 * 100, has_edge, py, px
-        # 暂时不训练边缘提取
-        # edge_region_predict = self.edge_region_predict(feature_map)
-        # edge_region_predict[:, 0:1] = torch.sigmoid(edge_region_predict[:, 0:1])
-        # edge_region_predict[:, 1:3] = torch.tanh(edge_region_predict[:, 1:3])
         rand = torch.abs(torch.rand_like(block_gt[:, 0], device=x.device))
         rand = rand / rand.max() / 10
         edge_region_predict = block_gt[:, 0:3]
@@ -291,7 +274,7 @@ class InstanceGrouping(torch.nn.Module):
         获取mobile net的各个block
         @return:
         """
-        mobile_net_v2 = mobilenet_v2(pretrained=False).features[0:18]
+        mobile_net_v2 = mobilenet_v2(pretrained=True).features[0:18]
         return (mobile_net_v2[0:4],
                 mobile_net_v2[4:7],
                 mobile_net_v2[7:11],
@@ -337,7 +320,7 @@ class InstanceGrouping(torch.nn.Module):
                     torch.pow(col[:, i:map_length] - col[:, i - 1:i], 2)
             )
         # 点间距离小于 4格对角线长5.656, 3格对角线长4.242,8格对角线长8.4, 同时将0-5的范围留空
-        adjacent_map[adjacent_map < 6 ** 2] = 0
+        adjacent_map[adjacent_map < 4 ** 2] = 0
         # adjacent_map[adjacent_map < 8.5 ** 2] = 0.4
         # 10格对角线长14.14121, 同时将1-14.5的范围留空
         # adjacent_map[adjacent_map < 14.5 ** 2] = 0.5

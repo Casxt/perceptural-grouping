@@ -302,5 +302,8 @@ class CitySpaceDataset(Dataset):
         edge: torch.Tensor = torch.from_numpy(CitySpaceDataset._get_edge(gt.numpy()[0, :, :])).float()
         edge = edge.unsqueeze(0)
         block_gt = self.get_block_ground_truth(gt, edge)
-        return self.normTransform(image), gt, edge, block_gt, image
+        return self.normTransform(image), gt, edge, block_gt, image, torch.cat([edge, edge, edge],
+                                                                               dim=1)
+
+        # return self.normTransform(image), gt, edge, block_gt, image
         # return image(3, 600, 800), gt(1, 600, 800), edge(1, 600, 800), block_gt(4, 75, 100)
