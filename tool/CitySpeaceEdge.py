@@ -294,13 +294,13 @@ class CitySpaceDataset(Dataset):
                         instance_map[block_label] = list()
                     instance_map[block_label].append((int(y / block_height), int(x / block_width)))
 
-        transaction_matrix = torch.eye(block_gt_h * block_gt_w, dtype=torch.float)
-        transaction_matrix = transaction_matrix.view(block_gt_h * block_gt_w, block_gt_h, block_gt_w)
+        transaction_matrix = torch.zeros(size=(block_gt_h * block_gt_w, block_gt_h, block_gt_w), dtype=torch.float)
         for block_group in instance_map.values():
             # 注意此处必须使用list
             block_index = list(map(lambda p: p[0] * block_gt_w + p[1], block_group))
             for y, x in block_group:
                 transaction_matrix[block_index, y, x] = 1
+                transaction_matrix[y * block_gt_w + x, y, x] = 0
 
         return block_gt, transaction_matrix
 
