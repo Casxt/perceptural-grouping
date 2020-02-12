@@ -15,10 +15,10 @@ from models import EdgeGrouping
 
 # cityspace 数据集， 一切默认
 device = 0
-epochs = 25
+epochs = 2000
 batchSize = 8
 workernum = 8
-subPath = Path("edge_grouping/second_try")
+subPath = Path("edge_grouping/fourth_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 
@@ -76,7 +76,7 @@ for epoch in range(epochs):
     train = DataLoader(dataSet.get_train(), shuffle=True, num_workers=workernum, batch_size=batchSize)
     start_time = time.time()
     for index, batch in enumerate(train):
-        image, edge, bgt, tm = to_device(device, *batch)
+        image, edge, bgt, tm, gt = to_device(device, *batch)
         output, loss, acc, res = forward(image, edge, bgt, tm, net)
         loss.backward()
         optimizer.step()
@@ -97,7 +97,7 @@ for epoch in range(epochs):
         start_time = used_time = time.time()
         bgt, index = None, None
         for index, batch in enumerate(val):
-            image, edge, bgt, tm = to_device(device, *batch)
+            image, edge, bgt, tm, gt = to_device(device, *batch)
             output, loss, acc, res = forward(image, edge, bgt, tm, net)
             total_loss += res['loss']
             total_acc += res['acc']

@@ -23,11 +23,13 @@ class EdgeGrouping(torch.nn.Module):
         )
 
         self.surface = Sequential(
-            Conv2d(1, 64, kernel_size=(3, 3), bias=False)
+            Conv2d(1, 64, kernel_size=(3, 3), padding=1, bias=False)
         )
 
         self.bottom = Sequential(
             Conv2d(2048, 1600, kernel_size=(3, 3), padding=1, bias=False),
+            Conv2d(1600, 1600, kernel_size=(3, 3), padding=1, bias=False),
+            Conv2d(1600, 1600, kernel_size=(3, 3), padding=1, bias=False),
             Sigmoid()
         )
 
@@ -72,13 +74,26 @@ class EdgeGrouping(torch.nn.Module):
         pos_num[pos_index] = 0
         neg_num[neg_index] = 0
         weight = (pos_num + neg_num)
-        return torch.nn.functional.binary_cross_entropy(output, target, weight, reduction='sum') / target.shape[0] / 100
+        return torch.nn.functional.binary_cross_entropy(output, target, weight, reduction='mean') * 10
 
     @staticmethod
     def loss(output: torch.Tensor, target: torch.Tensor):
-        return torch.nn.functional.binary_cross_entropy(output, target, reduction='sum') / target.shape[0] / 100
+        return torch.nn.functional.binary_cross_entropy(output, target, reduction='mean') * 1000
 
     @staticmethod
     def accuracy(output: torch.Tensor, target: torch.Tensor):
-        output = torch.round(output)
-        return 1 - torch.sum(output != target).float() / torch.sum(target)
+        b, c, h, w = output.shape
+        output = output.clone().detach().view(b, c, c)
+        target = target.view(b, c, c)
+        for i in range(c):
+            output[:, i, i] = 0
+        index = torch.argmax(output, dim=2)
+        total = 0
+        right = 0
+        for b, im in enumerate(index):
+            for c, r in enumerate(im):
+                if int(target[b, c, r]) == 1:
+                    right += 1
+                if int(target[b, c, :].max()) == 1:
+                    total += 1
+        return torch.tensor(right / total)

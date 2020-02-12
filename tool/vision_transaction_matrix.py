@@ -4,7 +4,9 @@ from torch import Tensor
 
 def vision_transaction_matrix(tm: Tensor):
     c, h, w = tm.shape
-    transaction_matrix = tm.view(c, h * w)
+    transaction_matrix = tm.clone().view(c, h * w)
+    for i in range(h * w):
+        transaction_matrix[i, i] = 0
     same_group_with = tuple(map(lambda x: int(x), torch.argmax(transaction_matrix[:], dim=1)))
     groups = []
     has_group = set()
@@ -21,5 +23,5 @@ def vision_transaction_matrix(tm: Tensor):
 
     img = torch.zeros(size=(1, h * w))
     for i, g in enumerate(groups):
-        img[0, list(g)] = i + 2
+        img[0, list(g)] = i
     return img.view(1, h, w)
