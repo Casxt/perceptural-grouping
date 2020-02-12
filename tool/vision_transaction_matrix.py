@@ -23,5 +23,5 @@ def vision_transaction_matrix(tm: Tensor):
 
     img = torch.zeros(size=(1, h * w))
     for i, g in enumerate(groups):
-        img[0, list(g)] = i
+        img[0, list(g)] = i + 1
     return img.view(1, h, w)

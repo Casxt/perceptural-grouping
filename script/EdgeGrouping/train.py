@@ -37,7 +37,7 @@ optimizer = torch.optim.Adam([
 def forward(image, edge, bgt, tm, net: EdgeGrouping):
     res = net(edge)
     loss = net.balance_loss(res, tm)
-    acc = net.accuracy(res, tm)
+    acc = net.accuracy(res, tm) if not net.training else torch.tensor(0.)
     return res, loss, acc, {'loss': loss.cpu(), "acc": acc.cpu()}
 
 
