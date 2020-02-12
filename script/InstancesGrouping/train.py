@@ -15,8 +15,8 @@ from models import InstanceGroupingV2 as InstanceGrouping
 # cityspace 数据集， 一切默认
 device = 0
 epochs = 2000
-batchSize = 15
-workernum = 36
+batchSize = 12
+workernum = 24
 subPath = Path("instance_grouping/eighth_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
@@ -53,9 +53,9 @@ for epoch in range(epochs):
 
     train = DataLoader(dataSet.get_train(), shuffle=True, num_workers=workernum, batch_size=batchSize)
     for index, batch in enumerate(train):
-        imgs, gts, edges, block_gt, raw_imgs, image_like_edge = to_device(device, *batch)
+        imgs, gts, edges, block_gt, raw_imgs = to_device(device, *batch)
         start_time = time.time()
-        edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(image_like_edge, edges,
+        edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs, edges,
                                                                                         block_gt)
         used_time = time.time() - start_time
 
@@ -129,10 +129,10 @@ for epoch in range(epochs):
                          batch_size=batchSize)
         total_time, index = 0, 0
         for index, batch in enumerate(val):
-            imgs, gts, edges, block_gt, raw_imgs, image_like_edge = to_device(device, *batch)
+            imgs, gts, edges, block_gt, raw_imgs = to_device(device, *batch)
 
             start_time = time.time()
-            edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(image_like_edge, edges,
+            edge_predict, edge_region_predict, sorted_topk_index, node_output_feature = net(imgs, edges,
                                                                                             block_gt)
             used_time = time.time() - start_time
 

@@ -2,6 +2,7 @@ import os
 import random
 from collections import namedtuple
 from pathlib import Path
+from typing import Tuple
 
 import cv2
 import numpy as np
@@ -80,7 +81,8 @@ class CitySpaceDataset(Dataset):
         transforms.Lambda(
             lambda img: torchvision.transforms.functional.crop(img, 6, 7, 836, 2035)
         ),
-        transforms.RandomCrop((600, 800)),
+        # transforms.Resize(800, interpolation=PIL.Image.NEAREST),
+        transforms.RandomCrop((320, 320)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
     ])
@@ -88,15 +90,10 @@ class CitySpaceDataset(Dataset):
         transforms.Lambda(
             lambda img: torchvision.transforms.functional.crop(img, 6, 7, 836, 2035)
         ),
-        transforms.RandomCrop((600, 800)),
+        # transforms.Resize(800, interpolation=PIL.Image.NEAREST),
+        transforms.RandomCrop((320, 320)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-    ])
-
-    randomTransform = transforms.Compose([
-        transforms.CenterCrop((836, 2035)),
-        transforms.RandomCrop((400, 600)),
-        transforms.RandomHorizontalFlip()
     ])
 
     normTransform = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -140,6 +137,10 @@ class CitySpaceDataset(Dataset):
         Label('license plate', -1, 0, 'vehicle', 7, False, True, (0, 0, 142)),
     ]
 
+    selected_label = [
+        19, 20, 21, 24, 25, 26, 27, 28, 29, 32, 33
+    ]
+
     # 各个屏蔽等级中对应的label id
     barrier_label = [
         # 0 级
@@ -177,7 +178,7 @@ class CitySpaceDataset(Dataset):
     @staticmethod
     def _get_edge(gt: np.array):
         edge = np.zeros_like(gt).astype(np.float64)
-        for i, num in enumerate(np.unique(gt)):
+        for i, num in enumerate(filter(lambda x: x != 0, np.unique(gt))):
             index = (gt == num) + 0.
             sobelx = cv2.Sobel(index, cv2.CV_64F, 1, 0)
             sobely = cv2.Sobel(index, cv2.CV_64F, 0, 1)
@@ -186,12 +187,12 @@ class CitySpaceDataset(Dataset):
             sobelcombine = cv2.addWeighted(absX, 0.5, absY, 0.5, 0)
             edge += sobelcombine
 
-        too_large = edge > 255
-        too_small = edge < 0
+        too_large = edge > 0
+        too_small = edge <= 0
         edge[too_large] = 255
         edge[too_small] = 0
 
-        return edge / (edge.max() + 1e-7)
+        return edge / 255
 
     @staticmethod
     def distance_mat_generator(block_height, block_width):
@@ -255,9 +256,9 @@ class CitySpaceDataset(Dataset):
                 if pixel_num > label_id[1]:
                     label_id = (elem, pixel_num)
 
-        return label_id[0]
+        return int(label_id[0])
 
-    def get_block_ground_truth(self, instance: torch.Tensor, edge: torch.Tensor) -> torch.Tensor:
+    def get_block_ground_truth(self, instance: torch.Tensor, edge: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         获取区块预测的ground truth
         @param instance: 1, h, w
@@ -266,8 +267,10 @@ class CitySpaceDataset(Dataset):
         """
         block_size = block_width = block_height = self.block_size
         c, h, w = edge.shape
+        block_gt_c, block_gt_h, block_gt_w = 4, int(h / block_size), int(w / block_size)
         # 4个channel分别代表是否包含边缘，边缘y位置， 边缘x位置, 小块类别
-        block_gt = torch.empty((4, int(h / block_size), int(w / block_size)), dtype=torch.float).to(edge.device)
+        block_gt = torch.empty((block_gt_c, block_gt_h, block_gt_w), dtype=torch.float).to(edge.device)
+        instance_map = dict()
         for x in range(0, w, block_width):
             for y in range(0, h, block_height):
                 edge_block = edge[:, y:y + block_height, x:x + block_width]
@@ -280,11 +283,29 @@ class CitySpaceDataset(Dataset):
                 nx = nx * 2 / block_width - 1
                 # block_label = 34  # 34 是数据集中不存在的一个值
                 block_label = CitySpaceDataset.get_block_instance(instance_block)
+                has_edge = has_edge and block_label != 0
+
                 block_gt[:, int(y / block_height), int(x / block_width)] = \
                     torch.tensor((1 if has_edge else 0, ny, nx, block_label),
                                  dtype=torch.float,
                                  device=block_gt.device)
-        return block_gt
+                if has_edge:
+                    if block_label not in instance_map:
+                        instance_map[block_label] = list()
+                    instance_map[block_label].append((int(y / block_height), int(x / block_width)))
+
+        transaction_matrix = torch.zeros(size=(block_gt_h * block_gt_w, block_gt_h, block_gt_w), dtype=torch.float)
+        for block_group in instance_map.values():
+            # 注意此处必须使用list
+            block_index = list(map(lambda p: p[0] * block_gt_w + p[1], block_group))
+            for y, x in block_group:
+                transaction_matrix[block_index, y, x] = 1
+                transaction_matrix[y * block_gt_w + x, y, x] = 0
+
+        return block_gt, transaction_matrix
+
+    def get_id(self, x):
+        return int(x) if x < 1000 else int(x / 1000)
 
     def __len__(self):
         return len(self.data)
@@ -295,13 +316,15 @@ class CitySpaceDataset(Dataset):
         # 固定 seed 保证image 和
         random.seed(seed)  # apply this seed to img tranfsorms
         gt: torch.Tensor = self.targetTransform(Image.open(self.ground_truth[index]))
-
+        for id in np.unique(gt):
+            if self.get_id(id) not in self.selected_label:
+                gt[gt == id] = 0
         random.seed(seed)
         image: torch.Tensor = self.transform(Image.open(self.data[index]))
         # edge 从 0->1, 但并不严格等于0或1
         edge: torch.Tensor = torch.from_numpy(CitySpaceDataset._get_edge(gt.numpy()[0, :, :])).float()
         edge = edge.unsqueeze(0)
-        block_gt = self.get_block_ground_truth(gt, edge)
-        return torch.cat([edge, edge, edge], dim=0), gt, edge, block_gt, image
-        # return self.normTransform(image), gt, edge, block_gt, image
-        # return image(3, 600, 800), gt(1, 600, 800), edge(1, 600, 800), block_gt(4, 75, 100)
+        bgt, tm = self.get_block_ground_truth(gt, edge)
+
+        return image, edge, bgt, tm, gt
+        # return image(3, 600, 800), edge(1, 600, 800), bgt(4, 75, 100), tm(75, 100, 7500)

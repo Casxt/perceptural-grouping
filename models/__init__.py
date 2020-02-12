@@ -1,1 +1,2 @@
+from .EdgeGroupingOnMobileV2 import EdgeGrouping
 from .InstanceGroupingOnMobileV2 import InstanceGrouping as InstanceGroupingV2
