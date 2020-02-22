@@ -7,6 +7,7 @@ from PIL import Image
 from matplotlib.pyplot import imsave
 from torchvision.transforms import transforms
 
+from .CitySpeaceEdgeGrouping import EdgeGroupingDataset
 from .vision_transaction_matrix import vision_transaction_matrix
 
 

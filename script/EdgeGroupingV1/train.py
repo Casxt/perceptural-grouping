@@ -18,7 +18,7 @@ device = 0
 epochs = 2000
 batchSize = 8
 workernum = 8
-subPath = Path("edge_grouping/fourth_try")
+subPath = Path("edge_grouping/fifth_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 

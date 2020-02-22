@@ -82,7 +82,7 @@ class CitySpaceDataset(Dataset):
             lambda img: torchvision.transforms.functional.crop(img, 6, 7, 836, 2035)
         ),
         # transforms.Resize(800, interpolation=PIL.Image.NEAREST),
-        transforms.RandomCrop((320, 320)),
+        transforms.RandomCrop((224, 224)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
     ])
@@ -91,7 +91,7 @@ class CitySpaceDataset(Dataset):
             lambda img: torchvision.transforms.functional.crop(img, 6, 7, 836, 2035)
         ),
         # transforms.Resize(800, interpolation=PIL.Image.NEAREST),
-        transforms.RandomCrop((320, 320)),
+        transforms.RandomCrop((224, 224)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
     ])
@@ -141,7 +141,7 @@ class CitySpaceDataset(Dataset):
         19, 20, 21, 24, 25, 26, 27, 28, 29, 32, 33
     ]
 
-    # 各个屏蔽等级中对应的label id
+    # 各个屏蔽等级中对应的label id, 等级高的物体可以遮蔽等级低物体
     barrier_label = [
         # 0 级
         {*range(0, 12), 23, -1},
@@ -193,6 +193,28 @@ class CitySpaceDataset(Dataset):
         edge[too_small] = 0
 
         return edge / 255
+
+    @staticmethod
+    def _get_instance_edge(gt: np.array):
+        edge = np.zeros_like(gt).astype(np.float64)
+        for i, num in enumerate(filter(lambda x: x != 0, np.unique(gt))):
+            index = (gt == num) + 0.
+            sobelx = cv2.Sobel(index, cv2.CV_64F, 1, 0)
+            sobely = cv2.Sobel(index, cv2.CV_64F, 0, 1)
+            absX = cv2.convertScaleAbs(sobelx)  # 转回uint8
+            absY = cv2.convertScaleAbs(sobely)
+            sobelcombine = cv2.addWeighted(absX, 0.5, absY, 0.5, 0)
+            # sobelcombine[sobelcombine > 0] = 255
+            # sobelcombine = cv2.dilate(sobelcombine, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
+            edge[sobelcombine > 0] = num
+            # edge += sobelcombine
+
+        # too_large = edge > 0
+        # too_small = edge <= 0
+        # edge[too_large] = 255
+        # edge[too_small] = 0
+
+        return edge
 
     @staticmethod
     def distance_mat_generator(block_height, block_width):
@@ -300,7 +322,7 @@ class CitySpaceDataset(Dataset):
             block_index = list(map(lambda p: p[0] * block_gt_w + p[1], block_group))
             for y, x in block_group:
                 transaction_matrix[block_index, y, x] = 1
-                transaction_matrix[y * block_gt_w + x, y, x] = 0
+                # transaction_matrix[y * block_gt_w + x, y, x] = 0
 
         return block_gt, transaction_matrix
 
@@ -312,7 +334,6 @@ class CitySpaceDataset(Dataset):
 
     def __getitem__(self, index):
         seed = np.random.randint(2147483647)  # make a seed with numpy generator
-
         # 固定 seed 保证image 和
         random.seed(seed)  # apply this seed to img tranfsorms
         gt: torch.Tensor = self.targetTransform(Image.open(self.ground_truth[index]))
@@ -325,6 +346,5 @@ class CitySpaceDataset(Dataset):
         edge: torch.Tensor = torch.from_numpy(CitySpaceDataset._get_edge(gt.numpy()[0, :, :])).float()
         edge = edge.unsqueeze(0)
         bgt, tm = self.get_block_ground_truth(gt, edge)
-
         return image, edge, bgt, tm, gt
         # return image(3, 600, 800), edge(1, 600, 800), bgt(4, 75, 100), tm(75, 100, 7500)
