@@ -17,7 +17,7 @@ device = 0
 epochs = 2000
 batchSize = 16
 workernum = 8
-subPath = Path("edge_grouping_v2/first_try")
+subPath = Path("edge_grouping_v2/second_try")
 save = Path("/root/edge_grouping_v2/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 
@@ -35,7 +35,7 @@ optimizer = torch.optim.Adam([
 
 def forward(image, instance_masking, instance_edge, edge, pool_edge, grouping_matrix, net: EdgeGroupingOnRestNet):
     res = net(edge, pool_edge)
-    loss = net.mask_loss(res, grouping_matrix, pool_edge)
+    loss = net.mask_sigmoid_loss(res, grouping_matrix, pool_edge)
     acc = net.accuracy(res, grouping_matrix, pool_edge)
     return res, loss, acc, {'loss': loss.cpu(), "acc": acc.cpu()}
 
@@ -53,10 +53,16 @@ def loging(perfix, epoch, step, used_time, dataset_size, batch_size, tensorboard
 
 def vision(perfix, step, image, instance_masking, instance_edge, edge, pool_edge, grouping_matrix, output):
     # 可视化
+    # 使用mask遮罩不属于edge的部分
+    b, c, h, w = grouping_matrix.shape
+    edge = (pool_edge > 0).to(torch.int)
+    # 注意下方尺度变换, 各个维度的位置及顺序已经经过测试, 切勿乱改
+    mask = edge.view(b, c, 1).expand(b, -1, c).view(b, c, h, w)
     image = image[0]
     pool_edge = pool_edge[0, 0]
     instance_edge = render_color(instance_edge[0, 0])
-    grouping_matrix = render_color(EdgeGroupingDataset.vision_transaction_matrix(grouping_matrix[0])[0] * pool_edge)
+    grouping_matrix = render_color(
+        EdgeGroupingDataset.vision_transaction_matrix((grouping_matrix * mask)[0])[0] * pool_edge)
     output = render_color(EdgeGroupingDataset.vision_transaction_matrix(output[0])[0] * pool_edge)
     writer.add_image(f"{perfix}_image", torch.cat([image, instance_edge], dim=2), step)
     writer.add_image(f"{perfix}_grouping", torch.cat([grouping_matrix, output], dim=2), step)
@@ -65,6 +71,9 @@ def vision(perfix, step, image, instance_masking, instance_edge, edge, pool_edge
 
 step, val_step = 0, 0
 for epoch in range(epochs):
+    if epoch == 5:
+        for p in optimizer.param_groups:
+            p["lr"] = 1e-4
     net.train()
     dataset = EdgeGroupingDataset(Path(dataset_path, "train"))
     train = DataLoader(dataset, shuffle=True, num_workers=workernum, batch_size=batchSize)
@@ -77,7 +86,8 @@ for epoch in range(epochs):
         optimizer.zero_grad()
         used_time = time.time() - start_time
         loging('train', epoch, step, used_time, dataset_size=len(train.dataset), batch_size=len(edge), **res)
-        vision('train', step, image, instance_masking, instance_edge, edge, pool_edge, grouping_matrix, output)
+        if index % 10 == 0:
+            vision('train', step, image, instance_masking, instance_edge, edge, pool_edge, grouping_matrix, output)
         step += len(edge)
         start_time = time.time()
 
@@ -95,7 +105,16 @@ for epoch in range(epochs):
                                              net)
             total_loss += res['loss']
             total_acc += res['acc']
+
+            if index % 10 == 0:
+                loging('val_step', epoch, epoch * len(val.dataset) + index, used_time, dataset_size=len(train.dataset),
+                       batch_size=len(batch),
+                       **{'loss': total_loss / index, 'acc': total_acc / index})
+                vision('val_step', epoch * len(val.dataset) + index, image, instance_masking, instance_edge, edge,
+                       pool_edge, grouping_matrix, output)
+        index += 1
         used_time = time.time() - start_time
         loging('val', epoch, epoch, used_time, dataset_size=len(train.dataset), batch_size=len(val.dataset),
                **{'loss': total_loss / index, 'acc': total_acc / index})
         vision('val', epoch, image, instance_masking, instance_edge, edge, pool_edge, grouping_matrix, output)
+        torch.save(net.state_dict(), Path(save, f"epoch{epoch}-loss{total_loss / index}-acc{total_acc / index}.weight"))

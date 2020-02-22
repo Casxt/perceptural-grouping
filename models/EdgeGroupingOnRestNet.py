@@ -41,11 +41,6 @@ class EdgeGroupingOnRestNet(torch.nn.Module):
         x = self.surface(x)
         x = self.backend(x)
         x = self.bottom(x)
-        # 使用mask遮罩不属于edge的部分
-        b, c, h, w = x.shape
-        edge = (pool_edge > 0).to(torch.int)
-        # 注意下方尺度变换, 各个维度的位置及顺序已经经过测试, 切勿乱改
-        mask = edge.view(b, c, 1).expand(b, -1, c).view(b, c, h, w)
         return x
 
     def _initialize_weights(self, *parts):
@@ -92,6 +87,29 @@ class EdgeGroupingOnRestNet(torch.nn.Module):
             out = output[b][idx][:, idx]
             tar = target[b][idx][:, idx]
             loss += torch.nn.functional.binary_cross_entropy(torch.sigmoid(out), tar, reduction='mean')
+        return loss / b
+
+    @staticmethod
+    def mask_sigmoid_loss(output: torch.Tensor, target: torch.Tensor, pool_edge: torch.Tensor):
+        b, c, h, w = output.shape
+        loss = torch.tensor(0., device=output.device)
+        output = output.view(b, c, c)
+        target = target.view(b, c, c)
+        for b, edge in enumerate(pool_edge):
+            idx = edge.view(c) > 0
+            out = output[b][idx][:, idx]
+            tar = target[b][idx][:, idx]
+            for i in range(out.shape[1]):
+                positive_mask = tar[:, i] > 0
+                positive_mask[i] = False
+                if positive_mask.sum() == 0:
+                    print(f"skip a node with {(tar[:, i] > 0).sum()} elements")
+                    continue
+                res = out[:, i]
+                positive_index = int(torch.argmax(res * positive_mask))
+                loss += (torch.nn.functional.cross_entropy(res.view(1, -1),
+                                                           torch.tensor([positive_index], device=output.device),
+                                                           reduction='mean') / len(idx))
         return loss / b
 
     @staticmethod
