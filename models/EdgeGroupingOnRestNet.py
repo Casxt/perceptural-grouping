@@ -33,15 +33,28 @@ class EdgeGroupingOnRestNet(torch.nn.Module):
             Conv2d(self.output_size ** 2, self.output_size ** 2, kernel_size=(3, 3), padding=1, bias=False),
         )
 
+        self.num_perd = Sequential(
+            # b, c, 28, 28
+            Conv2d(2048, 1024, kernel_size=(3, 3), padding=1, stride=2),
+            # b, c, 14, 14
+            Conv2d(1024, 512, kernel_size=(3, 3), padding=1, stride=2),
+            # b, c, 7, 7
+            nn.AdaptiveAvgPool2d((1, 1)),
+            # b, c, 1, 1
+            Conv2d(512, 10, kernel_size=(1, 1)),
+            # b, 10, 1, 1
+        )
+
         self._initialize_weights(self.surface,
                                  self.backend,
                                  self.bottom)
 
-    def forward(self, x, pool_edge):
+    def forward(self, x):
         x = self.surface(x)
-        x = self.backend(x)
-        x = self.bottom(x)
-        return x
+        feature = self.backend(x)
+        gm = self.bottom(feature)
+        num = self.num_perd(feature)
+        return gm, num
 
     def _initialize_weights(self, *parts):
         for part in parts:
@@ -58,7 +71,7 @@ class EdgeGroupingOnRestNet(torch.nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     @staticmethod
-    def balance_bce_loss(output: torch.Tensor, target: torch.Tensor, pool_edge: torch.Tensor):
+    def balance_bce_loss(output: torch.Tensor, target: torch.Tensor):
         pos_index = (target >= 0.5)
         neg_index = (target < 0.5)
         sum_num = int(output.nelement() / output.shape[0])
@@ -113,19 +126,32 @@ class EdgeGroupingOnRestNet(torch.nn.Module):
         return loss / b
 
     @staticmethod
-    def accuracy(output: torch.Tensor, target: torch.Tensor, pool_edge: torch.Tensor):
+    def k_loss(output: torch.Tensor, target: torch.Tensor):
+        return torch.nn.functional.cross_entropy(output, target, reduction='mean')
+
+    @staticmethod
+    def topk_accuracy(output: torch.Tensor, target: torch.Tensor, k):
         # 检查每一个像素是否具有正确指向
         b, c, h, w = output.shape
         output = output.view(b, c, c)
         target = target.view(b, c, c)
         correct, total = 0, 0
-        for b, edge in enumerate(pool_edge):
-            idx = [i for i, v in enumerate(edge.view(c)) if v > 0]
-            out = output[b][idx]
-            tar = target[b][idx]
-            for i in idx:
-                point_to = torch.argmax(out[:, i])
-                total += 1
-                if tar[point_to, i] > 0:
-                    correct += 1
+        idx_mask = (target > 0)
+        for (idx, out, tar) in zip(idx_mask, output, target):
+            out = out[idx][:, idx]
+            tar = tar[idx][:, idx]
+            _v, topk = torch.topk(out, k=k, dim=0)
+            for (rk, ro, rt) in zip(topk, tar, out):
+                correct += torch.round(ro[rk]).eq(rt).sum()
+                total += rt.nelement()
         return torch.tensor(correct / total, device=output.device)
+
+    @staticmethod
+    def k_accuracy(output: torch.Tensor, target: torch.Tensor):
+        """
+        分组数量k预测准确度
+        @param output:
+        @param target:
+        @return:
+        """
+        return torch.argmax(output, dim=1).eq(target).sum() / target.nelement()
