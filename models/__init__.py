@@ -1,1 +1,1 @@
-from .EdgeGroupingOnRestNet import EdgeGroupingOnRestNet
+from .RestNet import EdgeGroupingOnRestNet

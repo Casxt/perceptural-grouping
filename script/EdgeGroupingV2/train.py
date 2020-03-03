@@ -96,7 +96,7 @@ for epoch in range(epochs):
     train = DataLoader(dataset, shuffle=True, num_workers=workernum, batch_size=batchSize)
     start_time = time.time()
     for index, batch in enumerate(train):
-        image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix = to_device(
+        image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, adjacency_matrix = to_device(
             device, *batch)
         output, k, loss, acc, res = forward(image, instance_masking, instance_edge, instance_num, edge, pool_edge,
                                             grouping_matrix, nearby_matrix, net)
@@ -122,7 +122,7 @@ for epoch in range(epochs):
         image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, output, k, index = \
             None, None, None, None, None, None, None, None, None, None, None
         for index, batch in enumerate(val):
-            image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix = to_device(
+            image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, adjacency_matrix = to_device(
                 device, *batch)
             output, k, loss, acc, res = forward(image, instance_masking, instance_edge, instance_num, edge, pool_edge,
                                                 grouping_matrix, nearby_matrix,

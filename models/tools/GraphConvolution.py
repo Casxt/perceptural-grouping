@@ -1,70 +1,74 @@
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 
-def sparse_dropout(x, rate, noise_shape):
-    """
-    :param x:
-    :param rate:
-    :param noise_shape: int scalar
-    :return:
-    """
-    random_tensor = 1 - rate
-    random_tensor += torch.rand(noise_shape).to(x.device)
-    dropout_mask = torch.floor(random_tensor).byte()
-    i = x._indices()  # [2, 49216]
-    v = x._values()  # [49216]
+class InvertedGraphConvolution(nn.Module):
+    def __init__(self, node_num, input_feature_num, mid_feature_num, output_feature_num, first_add_bias=False,
+                 last_batch_normal=True):
+        super().__init__()
+        # shapes
+        # self.graph_num = node_num
+        self.input_feature_num = input_feature_num
+        self.output_feature_num = output_feature_num
+        self.layer = nn.Sequential(
+            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=first_add_bias, batch_normal=True),
+            nn.ReLU6(inplace=True),
+            GraphConvolution(node_num, mid_feature_num, mid_feature_num, batch_normal=False),
+            GraphConvolution(node_num, mid_feature_num, output_feature_num, batch_normal=last_batch_normal)
+        )
 
-    # [2, 4926] => [49216, 2] => [remained node, 2] => [2, remained node]
-    i = i[:, dropout_mask]
-    v = v[dropout_mask]
-
-    out = torch.sparse.FloatTensor(i, v, x.shape).to(x.device)
-
-    out = out * (1. / (1 - rate))
-
-    return out
+    def forward(self, inp: torch.Tensor):
+        x = self.layer(inp)
+        if self.input_feature_num == self.output_feature_num:
+            b, g, t = inp.shape
+            x[:, :, g:t] += inp[:, :, g:t]
+        return x
 
 
 class GraphConvolution(nn.Module):
 
-    def __init__(self, input_dim, output_dim, num_features_nonzero,
-                 dropout=0.,
-                 is_sparse_inputs=False,
-                 featureless=False):
-        super(GraphConvolution, self).__init__()
+    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float,
+                 batch_normal=True):
+        super().__init__()
+        # shapes
+        self.graph_num = node_num
+        self.input_feature_num = input_feature_num
+        self.output_feature_num = output_feature_num
+        self.add_bias = add_bias
+        self.batch_normal = batch_normal
 
-        self.dropout = dropout
-
-        self.is_sparse_inputs = is_sparse_inputs
-        self.featureless = featureless
-        self.num_features_nonzero = num_features_nonzero
-
-        self.weight = nn.Parameter(torch.randn(input_dim, output_dim))
-
-        self.bias = nn.Parameter(torch.zeros(output_dim))
-
-    def forward(self, inputs):
-        # print('inputs:', inputs)
-        x, support = inputs
-
-        if self.training and self.is_sparse_inputs:
-            x = sparse_dropout(x, self.dropout, self.num_features_nonzero)
-        elif self.training:
-            x = F.dropout(x, self.dropout)
-
-        # convolve
-        if not self.featureless:  # if it has features x
-            if self.is_sparse_inputs:
-                xw = torch.sparse.mm(x, self.weight)
-            else:
-                xw = torch.mm(x, self.weight)
+        # params
+        self.weight = nn.Parameter(torch.empty(input_feature_num, self.output_feature_num, dtype=dtype))
+        if add_bias:
+            self.bias = nn.Parameter(torch.empty(self.graph_num, self.output_feature_num, dtype=dtype))
         else:
-            xw = self.weight
+            self.bias = nn.Parameter(torch.empty(1, 1, dtype=dtype))
 
+        if batch_normal:
+            self.norm = nn.InstanceNorm1d(node_num)
+        # init params
+        # self.params_reset()
 
-        out = torch.sparse.mm(support, xw)
-        out += self.bias
+    # def params_reset(self):
+    #     nn.init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
+    #     nn.init.constant_(self.bias, 0)
 
-        return out, support
+    def set_trainable(self, train=True):
+        for param in self.parameters():
+            param.requires_grad = train
+
+    def forward(self, inp: torch.Tensor):
+        """
+        @param inp : adjacent: (batch, graph_num, graph_num) cat node_feature: (batch, graph_num, in_feature_num) -> (batch, graph_num, graph_num + in_feature_num)
+        @return:
+        """
+        b, g, t = inp.shape
+        adjacent, node_feature = inp[:, :, 0:g], inp[:, :, g:t]
+        x = torch.matmul(adjacent, node_feature)
+        x = torch.matmul(x, self.weight)
+        if self.add_bias:
+            x = x + self.bias
+        if self.batch_normal:
+            x = self.norm(x)
+
+        return torch.cat((adjacent, x), dim=2)

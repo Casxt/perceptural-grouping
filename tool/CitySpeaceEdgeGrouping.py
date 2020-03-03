@@ -138,4 +138,7 @@ class EdgeGroupingDataset(Dataset):
         nearby_matrix = torch.tensor(data['nearby_matrix'], dtype=torch.float)
         grouping_matrix = torch.tensor(data['grouping_matrix'], dtype=torch.float)
         pool_edge = self.most_pool(edge)
-        return image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix
+        assert pool_edge.shape[0] == 1
+        c, h, w = pool_edge.shape
+        adjacency_matrix = pool_edge.gt(0).to(torch.float).view(1, 1, h * w).expand(h * w, -1)
+        return image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, adjacency_matrix
