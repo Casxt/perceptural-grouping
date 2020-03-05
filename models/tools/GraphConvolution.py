@@ -11,10 +11,11 @@ class InvertedGraphConvolution(nn.Module):
         self.input_feature_num = input_feature_num
         self.output_feature_num = output_feature_num
         self.layer = nn.Sequential(
-            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=first_add_bias, batch_normal=False),
+            # nn.InstanceNorm1d(node_num),
+            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=first_add_bias),
             nn.ReLU6(inplace=True),
-            GraphConvolution(node_num, mid_feature_num, mid_feature_num, batch_normal=False),
-            GraphConvolution(node_num, mid_feature_num, output_feature_num, batch_normal=False)
+            GraphConvolution(node_num, mid_feature_num, mid_feature_num),
+            GraphConvolution(node_num, mid_feature_num, output_feature_num)
         )
 
     def forward(self, inp: torch.Tensor):
@@ -27,21 +28,17 @@ class InvertedGraphConvolution(nn.Module):
 
 class GraphConvolution(nn.Module):
 
-    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float,
-                 batch_normal=True):
+    def __init__(self, node_num, input_feature_num, output_feature_num, add_bias=True, dtype=torch.float):
         super().__init__()
         # shapes
         self.graph_num = node_num
         self.input_feature_num = input_feature_num
         self.output_feature_num = output_feature_num
         self.add_bias = add_bias
-        self.batch_normal = batch_normal
 
         # params
         self.weight = nn.Parameter(torch.empty(self.output_feature_num, input_feature_num, dtype=dtype))
         self.bias = nn.Parameter(torch.empty(self.output_feature_num, self.graph_num, dtype=dtype))
-        if batch_normal:
-            self.norm = nn.InstanceNorm1d(node_num)
 
     def set_trainable(self, train=True):
         for param in self.parameters():
@@ -58,7 +55,5 @@ class GraphConvolution(nn.Module):
         x = torch.matmul(x, adjacent)
         if self.add_bias:
             x = x + self.bias
-        if self.batch_normal:
-            x = self.norm(x)
 
         return torch.cat((adjacent, x), dim=1)

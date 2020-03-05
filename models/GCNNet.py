@@ -5,35 +5,38 @@ from torchvision.models import resnet50
 
 from models.tools import initialize_weights
 from models.tools.GraphConvolution import InvertedGraphConvolution
+from models.tools.InvertedResidual import InvertedResidual
 
 
 class GroupNumPredict(torch.nn.Module):
     def __init__(self, node_num, out_dim):
         super().__init__()
         self.focus_layer = nn.Sequential(
-            InvertedGraphConvolution(node_num, 2048, 1024, 1024),
-            InvertedGraphConvolution(node_num, 1024, 2048, 1024),
-            InvertedGraphConvolution(node_num, 1024, 2048, 1024, last_batch_normal=False)
+            InvertedGraphConvolution(node_num, 2048, 4096, 1024, last_batch_normal=False)
         )
 
         self.pooling_layer = nn.Sequential(
             # b, c, 28, 28
             nn.BatchNorm2d(1024),
-            Conv2d(1024, 512, kernel_size=(3, 3), padding=1, stride=2),
+            Conv2d(1024, 1024, kernel_size=(3, 3), padding=1, stride=2),
             # b, c, 14, 14
-            Conv2d(512, 512, kernel_size=(3, 3), padding=1, stride=2),
-            nn.ReLU(),
+            Conv2d(1024, 1024, kernel_size=(3, 3), padding=1, stride=2),
+            nn.BatchNorm2d(1024),
+            nn.ReLU6(),
             # b, c, 7, 7
-            Conv2d(512, 512, kernel_size=(1, 7)),
-            Conv2d(512, 512, kernel_size=(7, 1)),
+            Conv2d(1024, 1024, kernel_size=(1, 7)),
+            Conv2d(1024, 1024, kernel_size=(7, 1)),
             # b, c, 1, 1
-            Conv2d(512, out_dim, kernel_size=(1, 1)),
+            nn.BatchNorm2d(1024),
+            nn.ReLU6(),
+            Conv2d(1024, 1024, kernel_size=(1, 1)),
+            Conv2d(1024, out_dim, kernel_size=(1, 1)),
             # b, out_dim, 1, 1
         )
 
     def forward(self, x: torch.Tensor, adjacent: torch.Tensor):
         b, c, h, w = x.shape
-        x = x.view(b, c, h * w)
+        x = x.view(b, -1, h * w)
         o = self.focus_layer(torch.cat([adjacent, x], dim=1))
         x = o[:, h * w:, :]
         x = x.view(b, -1, h, w)
@@ -46,30 +49,26 @@ class FocusGrouping(torch.nn.Module):
     def __init__(self, node_num, in_dim, out_dim):
         super().__init__()
 
-        self.focus_layer = nn.Sequential(
-            InvertedGraphConvolution(node_num, in_dim, 1024, 1024),
-            InvertedGraphConvolution(node_num, 1024, 2048, 1024),
-            InvertedGraphConvolution(node_num, 1024, 2048, 1024, last_batch_normal=False)
-            # GraphConvolution(node_num, 2048, 1024, add_bias=False, batch_normal=False),
-            # GraphConvolution(node_num, 1024, 1024, batch_normal=False),
+        self.surface = nn.Sequential(
+            InvertedResidual(in_dim, in_dim, 1, 2),
+            InvertedResidual(in_dim, 1024, 1, 2),
+            InvertedResidual(1024, 1024, 1, 4),
+            InvertedResidual(1024, 1024, 1, 2),
+            InvertedResidual(1024, out_dim, 1, 2),
         )
 
-        self.bottom = nn.Sequential(
-            # b, c, 28, 28
-            nn.BatchNorm2d(1024),
-            Conv2d(1024, out_dim, kernel_size=(3, 3), padding=1, stride=1),
-            # b, c, 28, 28
-            Conv2d(out_dim, out_dim, kernel_size=(1, 1)),
-            # b, out_dim, 28, 28
+        self.focus_layer = nn.Sequential(
+            InvertedGraphConvolution(node_num, out_dim, out_dim * 2, out_dim, last_batch_normal=False),
         )
 
     def forward(self, x: torch.Tensor, adjacent: torch.Tensor):
         b, c, h, w = x.shape
-        x = x.view(b, c, h * w)
+        x = self.surface(x)
+        x = x.view(b, -1, h * w)
         o = self.focus_layer(torch.cat([adjacent, x], dim=1))
         x = o[:, h * w:, :]
         x = x.view(b, -1, h, w)
-        x = self.bottom(x)
+        # x = self.bottom(x)
         return x
 
 

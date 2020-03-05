@@ -15,9 +15,9 @@ from models import EdgeGroupingOnGCN
 # cityspace 数据集， 一切默认
 device = 0
 epochs = 2000
-batchSize = 8
+batchSize = 6
 workernum = 8
-subPath = Path("gcn_focus/fourth_try")
+subPath = Path("gcn_focus/sixth_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 

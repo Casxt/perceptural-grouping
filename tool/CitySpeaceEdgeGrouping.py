@@ -140,7 +140,11 @@ class EdgeGroupingDataset(Dataset):
         pool_edge = self.most_pool(edge)
         assert pool_edge.shape[0] == 1
         c, h, w = pool_edge.shape
-        mask = pool_edge.view(h * w).gt(0)
+        mask = pool_edge.view(h * w).gt(0).to(torch.float)
         adjacency_matrix = torch.zeros((h * w, h * w), dtype=pool_edge.dtype)
-        adjacency_matrix[mask] = mask.to(torch.float)
+        for i, v in filter(lambda inp: inp[1] > 0, enumerate(mask)):
+            y, x = int(i / w), int(i % w)
+            nearby_mask = torch.zeros_like(mask).view(h, w)
+            nearby_mask[max(0, y - 1):y + 1, max(0, x - 1):x + 1] = 1
+            adjacency_matrix[i] = mask * nearby_mask.view(h * w)
         return image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, adjacency_matrix
