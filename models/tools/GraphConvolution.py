@@ -11,17 +11,17 @@ class InvertedGraphConvolution(nn.Module):
         self.input_feature_num = input_feature_num
         self.output_feature_num = output_feature_num
         self.layer = nn.Sequential(
-            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=first_add_bias, batch_normal=True),
+            GraphConvolution(node_num, input_feature_num, mid_feature_num, add_bias=first_add_bias, batch_normal=False),
             nn.ReLU6(inplace=True),
             GraphConvolution(node_num, mid_feature_num, mid_feature_num, batch_normal=False),
-            GraphConvolution(node_num, mid_feature_num, output_feature_num, batch_normal=last_batch_normal)
+            GraphConvolution(node_num, mid_feature_num, output_feature_num, batch_normal=False)
         )
 
     def forward(self, inp: torch.Tensor):
         x = self.layer(inp)
         if self.input_feature_num == self.output_feature_num:
-            b, g, t = inp.shape
-            x[:, :, g:t] += inp[:, :, g:t]
+            b, c, n = inp.shape
+            x[:, n:, :] += inp[:, n:, :]
         return x
 
 
@@ -38,20 +38,10 @@ class GraphConvolution(nn.Module):
         self.batch_normal = batch_normal
 
         # params
-        self.weight = nn.Parameter(torch.empty(input_feature_num, self.output_feature_num, dtype=dtype))
-        if add_bias:
-            self.bias = nn.Parameter(torch.empty(self.graph_num, self.output_feature_num, dtype=dtype))
-        else:
-            self.bias = nn.Parameter(torch.empty(1, 1, dtype=dtype))
-
+        self.weight = nn.Parameter(torch.empty(self.output_feature_num, input_feature_num, dtype=dtype))
+        self.bias = nn.Parameter(torch.empty(self.output_feature_num, self.graph_num, dtype=dtype))
         if batch_normal:
             self.norm = nn.InstanceNorm1d(node_num)
-        # init params
-        # self.params_reset()
-
-    # def params_reset(self):
-    #     nn.init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
-    #     nn.init.constant_(self.bias, 0)
 
     def set_trainable(self, train=True):
         for param in self.parameters():
@@ -62,13 +52,13 @@ class GraphConvolution(nn.Module):
         @param inp : adjacent: (batch, graph_num, graph_num) cat node_feature: (batch, graph_num, in_feature_num) -> (batch, graph_num, graph_num + in_feature_num)
         @return:
         """
-        b, g, t = inp.shape
-        adjacent, node_feature = inp[:, :, 0:g], inp[:, :, g:t]
-        x = torch.matmul(adjacent, node_feature)
-        x = torch.matmul(x, self.weight)
+        b, c, n = inp.shape
+        adjacent, node_feature = inp[:, 0:n, :], inp[:, n:, :]
+        x = torch.matmul(self.weight, node_feature)
+        x = torch.matmul(x, adjacent)
         if self.add_bias:
             x = x + self.bias
         if self.batch_normal:
             x = self.norm(x)
 
-        return torch.cat((adjacent, x), dim=2)
+        return torch.cat((adjacent, x), dim=1)

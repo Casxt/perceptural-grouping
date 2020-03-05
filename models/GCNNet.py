@@ -3,28 +3,23 @@ from torch import nn
 from torch.nn import Conv2d, Sequential
 from torchvision.models import resnet50
 
-# v2 将register_forward_hook修改为原结构直出
 from models.tools import initialize_weights
 from models.tools.GraphConvolution import InvertedGraphConvolution
 
 
 class GroupNumPredict(torch.nn.Module):
-    def __init__(self, out_dim):
+    def __init__(self, node_num, out_dim):
         super().__init__()
-        self.force_layer_out_dim = 512
         self.focus_layer = nn.Sequential(
-            InvertedGraphConvolution(self.output_size ** 2, 2048, 1024, 512),
-            InvertedGraphConvolution(self.output_size ** 2, 512, 1024, self.force_layer_out_dim)
+            InvertedGraphConvolution(node_num, 2048, 1024, 1024),
+            InvertedGraphConvolution(node_num, 1024, 2048, 1024),
+            InvertedGraphConvolution(node_num, 1024, 2048, 1024, last_batch_normal=False)
         )
 
         self.pooling_layer = nn.Sequential(
             # b, c, 28, 28
-            # InvertedResidual(1024, 1024, 2, 2),
-            # b, c, 14, 14
-            # InvertedResidual(1024, 1024, 2, 2),
-            # b, c, 28, 28
-            nn.BatchNorm2d(512),
-            Conv2d(512, 512, kernel_size=(3, 3), padding=1, stride=2),
+            nn.BatchNorm2d(1024),
+            Conv2d(1024, 512, kernel_size=(3, 3), padding=1, stride=2),
             # b, c, 14, 14
             Conv2d(512, 512, kernel_size=(3, 3), padding=1, stride=2),
             nn.ReLU(),
@@ -39,11 +34,9 @@ class GroupNumPredict(torch.nn.Module):
     def forward(self, x: torch.Tensor, adjacent: torch.Tensor):
         b, c, h, w = x.shape
         x = x.view(b, c, h * w)
-        x = x.permute(0, 2, 1).contiguous()
-        o = self.focus_layer(torch.cat([adjacent, x], dim=2))
-        x = o[:, :, h * w:]
-        x = x.permute(0, 2, 1).contiguous()
-        x = x.view(b, self.force_layer_out_dim, h, w)
+        o = self.focus_layer(torch.cat([adjacent, x], dim=1))
+        x = o[:, h * w:, :]
+        x = x.view(b, -1, h, w)
         x = self.pooling_layer(x)
         x = x.view(b, -1)
         return x
@@ -52,21 +45,31 @@ class GroupNumPredict(torch.nn.Module):
 class FocusGrouping(torch.nn.Module):
     def __init__(self, node_num, in_dim, out_dim):
         super().__init__()
+
         self.focus_layer = nn.Sequential(
             InvertedGraphConvolution(node_num, in_dim, 1024, 1024),
             InvertedGraphConvolution(node_num, 1024, 2048, 1024),
-            InvertedGraphConvolution(node_num, 1024, 2048, 1024),
-            InvertedGraphConvolution(node_num, 1024, 2048, out_dim, last_batch_normal=False),
+            InvertedGraphConvolution(node_num, 1024, 2048, 1024, last_batch_normal=False)
+            # GraphConvolution(node_num, 2048, 1024, add_bias=False, batch_normal=False),
+            # GraphConvolution(node_num, 1024, 1024, batch_normal=False),
+        )
+
+        self.bottom = nn.Sequential(
+            # b, c, 28, 28
+            nn.BatchNorm2d(1024),
+            Conv2d(1024, out_dim, kernel_size=(3, 3), padding=1, stride=1),
+            # b, c, 28, 28
+            Conv2d(out_dim, out_dim, kernel_size=(1, 1)),
+            # b, out_dim, 28, 28
         )
 
     def forward(self, x: torch.Tensor, adjacent: torch.Tensor):
         b, c, h, w = x.shape
         x = x.view(b, c, h * w)
-        x = x.permute(0, 2, 1).contiguous()
-        o = self.force_layer(torch.cat([adjacent, x], dim=2))
-        x = o[:, :, h * w:]
-        x = x.permute(0, 2, 1).contiguous()
+        o = self.focus_layer(torch.cat([adjacent, x], dim=1))
+        x = o[:, h * w:, :]
         x = x.view(b, -1, h, w)
+        x = self.bottom(x)
         return x
 
 
@@ -94,7 +97,7 @@ class EdgeGroupingOnGCN(torch.nn.Module):
 
         self.bottom = FocusGrouping(self.output_size ** 2, 2048, self.output_size ** 2)
 
-        self.num_predict = GroupNumPredict(self.max_instance_num)
+        self.num_predict = GroupNumPredict(self.output_size ** 2, self.max_instance_num)
 
         initialize_weights(self.surface,
                            self.backend,
