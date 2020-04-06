@@ -126,6 +126,19 @@ class EdgeGroupingDataset(Dataset):
             out[inp == val] = i + 1
         return out
 
+    @staticmethod
+    def get_adjacency_matrix(pool_edge: torch.Tensor):
+        assert pool_edge.shape[0] == 1
+        c, h, w = pool_edge.shape
+        mask = pool_edge.view(h * w).gt(0).to(torch.float)
+        adjacency_matrix = torch.zeros((h * w, h * w), dtype=pool_edge.dtype)
+        for i, v in filter(lambda inp: inp[1] > 0, enumerate(mask)):
+            y, x = int(i / w), int(i % w)
+            nearby_mask = torch.zeros_like(mask).view(h, w)
+            nearby_mask[max(0, y - 1):y + 1, max(0, x - 1):x + 1] = 1
+            adjacency_matrix[i] = mask * nearby_mask.view(h * w)
+        return adjacency_matrix
+
     def __getitem__(self, index):
         data = np.load(self.files[index])
         # image_path 是str不可以用于打包
@@ -138,13 +151,5 @@ class EdgeGroupingDataset(Dataset):
         nearby_matrix = torch.tensor(data['nearby_matrix'], dtype=torch.float)
         grouping_matrix = torch.tensor(data['grouping_matrix'], dtype=torch.float)
         pool_edge = self.most_pool(edge)
-        assert pool_edge.shape[0] == 1
-        c, h, w = pool_edge.shape
-        mask = pool_edge.view(h * w).gt(0).to(torch.float)
-        adjacency_matrix = torch.zeros((h * w, h * w), dtype=pool_edge.dtype)
-        for i, v in filter(lambda inp: inp[1] > 0, enumerate(mask)):
-            y, x = int(i / w), int(i % w)
-            nearby_mask = torch.zeros_like(mask).view(h, w)
-            nearby_mask[max(0, y - 1):y + 1, max(0, x - 1):x + 1] = 1
-            adjacency_matrix[i] = mask * nearby_mask.view(h * w)
+        adjacency_matrix = self.get_adjacency_matrix(pool_edge)
         return image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, adjacency_matrix
