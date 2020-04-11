@@ -140,7 +140,7 @@ class HGRU(nn.Module):
             InvertedResidual(256, 512, 2, 2),
             InvertedResidual(512, 1024, 2, 2),
             # b, c, 7, 7
-            nn.MaxPool2d((1, 1)),
+            nn.MaxPool2d((7, 7)),
             # b, c, 1, 1
             Conv2d(1024, self.max_instance_num, kernel_size=(1, 1)),
             # b, 10, 1, 1
@@ -150,7 +150,7 @@ class HGRU(nn.Module):
         (full_resolution_internal_state,
          half_resolution_internal_state,
          mixed_resolution_internal_state) = None, None, None
-
+        b, c, h, w = x.shape
         x = self.conv0(x)
         x = torch.pow(x, 2)
         full_inp = x
@@ -167,4 +167,4 @@ class HGRU(nn.Module):
                                                               timestep=i)
         gm = self.read_out(mixed_resolution_internal_state)
         num = self.num_perd(mixed_resolution_internal_state)
-        return torch.sigmoid(gm), num
+        return torch.sigmoid(gm), num.view(b, -1)

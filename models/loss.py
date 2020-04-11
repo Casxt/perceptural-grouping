@@ -35,4 +35,5 @@ def mask_bce_loss(output: torch.Tensor, target: torch.Tensor, pool_edge: torch.T
 
 def k_loss(output: torch.Tensor, target: torch.Tensor):
     # print(torch.argmax(output, dim=1), target)
+    print(output.shape, target.shape)
     return torch.nn.functional.cross_entropy(output, target, reduction='mean')

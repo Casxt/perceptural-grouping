@@ -10,7 +10,9 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tool import to_device, render_color
 from tool.CitySpeaceEdgeGrouping import EdgeGroupingDataset
-from models import HGRU, loss, accuracy
+from models import HGRU
+from models.loss import k_loss, mask_bce_loss
+from models.accuracy import k_accuracy, topk_accuracy
 
 # cityspace 数据集， 一切默认
 device = 0
@@ -35,12 +37,12 @@ def forward(net: HGRU, image, instance_masking, instance_edge, instance_num, edg
             grouping_matrix, nearby_matrix,
             adjacent_matrix):
     gm, k = net(edge, adjacent_matrix)
-    gm_loss = loss.mask_bce_loss(gm, grouping_matrix, pool_edge)
-    k_loss = loss.k_loss(k, instance_num)
-    gm_acc = accuracy.topk_accuracy(gm, grouping_matrix, pool_edge, k=5)
-    k_acc = accuracy.k_accuracy(k, instance_num)
-    return gm, k, gm_loss + k_loss, gm_acc, {'k_loss': k_loss.cpu(), 'gm_loss': gm_loss.cpu(), "top5_acc": gm_acc.cpu(),
-                                             'k_acc': k_acc.cpu()}
+    gm_l = mask_bce_loss(gm, grouping_matrix, pool_edge)
+    k_l = k_loss(k, instance_num)
+    gm_acc = topk_accuracy(gm, grouping_matrix, pool_edge, k=5)
+    k_acc = k_accuracy(k, instance_num)
+    return gm, k, gm_l + k_l, gm_acc, {'k_loss': k_l.cpu(), 'gm_loss': gm_l.cpu(), "top5_acc": gm_acc.cpu(),
+                                       'k_acc': k_acc.cpu()}
 
 
 def loging(perfix, epoch, step, used_time, dataset_size, batch_size, tensorboard=True, **addentional):
