@@ -21,7 +21,7 @@ device = 0
 epochs = 2000
 batchSize = 6
 workernum = 8
-subPath = Path("hgru/first_try")
+subPath = Path("transform/first_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
 
@@ -60,7 +60,6 @@ def forward(net: EdgeGroupingOnTransform, image, instance_masking, instance_edge
     print("memory size:", memory.shape)
     output = torch.zeros(1, 1, 784).type_as(src.data)
     for i in range(784):
-        print("decode pos:", i)
         out = net.decode(memory, None,
                          output,
                          subsequent_mask(output.size(1)).type_as(src.data))
