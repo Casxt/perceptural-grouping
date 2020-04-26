@@ -3,7 +3,7 @@ import math
 import torch
 from torch import nn
 
-from models.Transform import clones
+from . import clones
 
 
 def attention(query, key, value, mask=None, dropout=None):

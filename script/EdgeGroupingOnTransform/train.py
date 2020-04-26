@@ -1,8 +1,6 @@
 import sys
 from os import path
 
-from models.Transform import subsequent_mask
-
 sys.path.append(path.join(path.join(path.dirname(__file__), '..'), ".."))
 
 import time
@@ -12,7 +10,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tool import to_device, render_color
 from tool.CitySpeaceEdgeGrouping import EdgeGroupingDataset
-from models import EdgeGroupingOnTransform, make_image_model
+from models import EdgeGroupingOnTransform, make_image_model, subsequent_mask
 from models.loss import k_loss, mask_bce_loss
 from models.accuracy import k_accuracy, topk_accuracy
 

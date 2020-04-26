@@ -2,14 +2,14 @@ import copy
 
 from torch import nn
 
-from models.Transform.attention import MultiHeadedAttention
-from models.Transform.decoder import Decoder, DecoderLayer
-from models.Transform.embeddings import Embeddings
-from models.Transform.encoder import Encoder, EncoderLayer
-from models.Transform.feedforward import PositionwiseFeedForward
-from models.Transform.generator import Generator
-from models.Transform.model import EncoderDecoder
-from models.Transform.positional_encoding import PositionalEncoding
+from .attention import MultiHeadedAttention
+from .decoder import Decoder, DecoderLayer
+from .embeddings import Embeddings
+from .encoder import Encoder, EncoderLayer
+from .feedforward import PositionwiseFeedForward
+from .generator import Generator
+from .model import EncoderDecoder
+from .positional_encoding import PositionalEncoding
 
 
 def make_nlp_model(src_vocab, tgt_vocab, N=6,

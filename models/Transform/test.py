@@ -1,8 +1,8 @@
 import torch
 
-from models.Transform import subsequent_mask
-from models.Transform.make_model import make_image_model
-from models.Transform.model import EncoderDecoder
+from . import subsequent_mask
+from .make_model import make_image_model
+from .model import EncoderDecoder
 
 
 def run(model: EncoderDecoder, src, max_len):
