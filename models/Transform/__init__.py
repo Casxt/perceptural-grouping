@@ -4,6 +4,9 @@ import numpy as np
 import torch
 from torch import nn
 
+from .make_model import make_image_model, make_nlp_model
+from .model import EncoderDecoder
+
 
 def subsequent_mask(size):
     "Mask out subsequent positions."
