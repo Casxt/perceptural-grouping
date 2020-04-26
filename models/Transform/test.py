@@ -1,32 +1,30 @@
-import copy
+import torch
 
-from torch import nn
-
-from models.Transform.attention import MultiHeadedAttention
-from models.Transform.embeddings import Embeddings
-from models.Transform.encoder_decoder import EncoderDecoder, EncoderLayer, Encoder, Decoder, DecoderLayer, Generator
-from models.Transform.feedforward import PositionwiseFeedForward
-from models.Transform.positional_encoding import PositionalEncoding
+from models.Transform import subsequent_mask
+from models.Transform.make_model import make_image_model
+from models.Transform.model import EncoderDecoder
 
 
-def make_model(src_vocab, tgt_vocab, N=6,
-               d_model=512, d_ff=2048, h=8, dropout=0.1):
-    "Helper: Construct a model from hyperparameters."
-    c = copy.deepcopy
-    attn = MultiHeadedAttention(h, d_model)
-    ff = PositionwiseFeedForward(d_model, d_ff, dropout)
-    position = PositionalEncoding(d_model, dropout)
-    model = EncoderDecoder(
-        Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
-        Decoder(DecoderLayer(d_model, c(attn), c(attn),
-                             c(ff), dropout), N),
-        nn.Sequential(Embeddings(d_model, src_vocab), c(position)),
-        nn.Sequential(Embeddings(d_model, tgt_vocab), c(position)),
-        Generator(d_model, tgt_vocab))
+def run(model: EncoderDecoder, src, max_len):
+    memory = model.encode(src, None)
+    print("memory size:", memory.shape)
+    output = torch.zeros(1, 1, 784).type_as(src.data)
+    for i in range(max_len - 1):
+        print("decode pos:", i)
+        out = model.decode(memory, None,
+                           output,
+                           subsequent_mask(output.size(1)).type_as(src.data))
+        # 取出预测序列的最后一个元素
+        out = out[:, -1:, :]
+        out = model.generator(out)
+        output = torch.cat([output, out], dim=1)
+    return output
 
-    # This was important from their code.
-    # Initialize parameters with Glorot / fan_avg.
-    for p in model.parameters():
-        if p.dim() > 1:
-            nn.init.xavier_uniform(p)
-    return model
+
+if __name__ == "__main__":
+    # with torch.no_grad():
+    inp = torch.zeros(1, 785, 64, dtype=torch.float)
+    model = make_image_model(input_channel=inp.size(2), output_channel=784, max_len=784 * 512)
+    model.eval()
+    out = run(model, inp, inp.size(1))
+    print("output size:", out.shape)
