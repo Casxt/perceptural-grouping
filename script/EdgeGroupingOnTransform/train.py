@@ -41,9 +41,10 @@ def chunk_image(data, block_size):
     """
     b, c, h, w = data.shape
     assert c == 1, "image channel should be 1"
-    d2 = torch.chunk(data, w / block_size, dim=3)
+    assert h % block_size == 0 and w % block_size == 0
+    d2 = torch.chunk(data, int(w / block_size), dim=3)
     d2 = torch.cat(d2, dim=1)
-    d3 = torch.chunk(d2, h / block_size, dim=2)
+    d3 = torch.chunk(d2, int(h / block_size), dim=2)
     return torch.cat(d3, dim=1)
 
 

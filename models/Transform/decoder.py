@@ -1,8 +1,8 @@
 from torch import nn as nn
 
-from . import clones
 from .layer_norm import LayerNorm
 from .sublayer_connection import SublayerConnection
+from .tool import clones
 
 
 class Decoder(nn.Module):

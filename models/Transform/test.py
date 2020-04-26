@@ -1,6 +1,6 @@
 import torch
 
-from . import subsequent_mask
+from models import subsequent_mask
 from .make_model import make_image_model
 from .model import EncoderDecoder
 
