@@ -11,14 +11,20 @@ from torch.utils.tensorboard import SummaryWriter
 from tool import to_device, render_color
 from tool.CitySpeaceEdgeGrouping import EdgeGroupingDataset
 from models import EdgeGroupingOnTransform, make_image_model, subsequent_mask
-from models.loss import k_loss, mask_bce_loss
+from models.loss import mask_bce_loss, balance_bce_loss
 from models.accuracy import k_accuracy, topk_accuracy
 
 # cityspace 数据集， 一切默认
 device = 0
 epochs = 2000
-batchSize = 6
+batchSize = 8
 workernum = 8
+backward_step = [
+    *[i for i in range(1, 200, 28)],
+    *[i for i in range(200, 400, 14)],
+    *[i for i in range(400, 784, 6)],
+]
+
 subPath = Path("transform/first_try")
 save = Path("/root/perceptual_grouping/weight", subPath)
 save.mkdir(parents=True) if not save.exists() else None
@@ -26,7 +32,10 @@ save.mkdir(parents=True) if not save.exists() else None
 writer = SummaryWriter(Path("/root/perceptual_grouping/log", subPath))
 
 dataset_path = Path("/root/perceptual_grouping/dataset/edge_grouping")
-net: EdgeGroupingOnTransform = make_image_model(input_channel=64, output_channel=784, max_len=784 * 512).cuda(device)
+net: EdgeGroupingOnTransform = make_image_model(input_channel=64, output_channel=784,
+                                                stack_size=6,
+                                                d_model=256, h=4, d_ff=1024,
+                                                max_len=784 * 512).cuda(device)
 
 optimizer = torch.optim.Adam([
     {'params': net.parameters()},
@@ -48,16 +57,72 @@ def chunk_image(data, block_size):
     return torch.cat(d3, dim=1)
 
 
-def forward(net: EdgeGroupingOnTransform, image, instance_masking, instance_edge, instance_num, edge, pool_edge,
-            grouping_matrix, nearby_matrix,
-            adjacent_matrix):
+def get_mock_output(grouping_matrix):
+    # 交换维度
+    mock_output = grouping_matrix.permute(0, 2, 3, 1)
+    mock_output = mock_output.reshape(mock_output.shape[0],
+                                      mock_output.shape[1] * mock_output.shape[2],
+                                      mock_output.shape[3])
+
+    mock_output = torch.cat([torch.zeros(mock_output.shape[0], 1, 784).to(edge.device), mock_output], dim=1)
+
+    return mock_output.requires_grad_(False)
+
+
+def train_forward_encode(net: EdgeGroupingOnTransform, image, instance_masking, instance_edge, instance_num, edge,
+                         pool_edge,
+                         grouping_matrix, nearby_matrix,
+                         adjacent_matrix):
     src = chunk_image(edge, 8)
     src = src.reshape((pool_edge.shape[0], -1, 8 * 8))
     # 添加开始占位符
-    src = torch.cat([torch.zeros(1, 1, 4), src], dim=1)
+    src = torch.cat([torch.zeros(pool_edge.shape[0], 1, 64).to(src.device), src], dim=1)
+    src = src.requires_grad_(False)
     memory = net.encode(src, None)
-    print("memory size:", memory.shape)
-    output = torch.zeros(1, 1, 784).type_as(src.data)
+    return memory
+
+
+def train_forward_decode(net: EdgeGroupingOnTransform, image, instance_masking, instance_edge, instance_num, edge,
+                         pool_edge,
+                         grouping_matrix, nearby_matrix,
+                         adjacent_matrix, i, memory, mock_output):
+    mock_output = mock_output[:, 0:1 + i, :]
+    out = net.decode(memory, None,
+                     mock_output,
+                     subsequent_mask(mock_output.size(1)).type_as(edge.data))
+    # 取出预测序列的最后一个元素
+    out = out[:, -1:, :]
+    out = net.generator(out)
+
+    output = torch.cat([mock_output, out], dim=1)
+
+    if i == 783:
+        gm = output[:, 1:, :].permute(0, 2, 1).reshape(grouping_matrix.shape)
+    else:
+        gm = None
+
+    k = torch.zeros(instance_num.shape[0], 9).to(instance_num.device)
+    for i, num in enumerate(instance_num):
+        k[i, num] = 1
+    gm_l = balance_bce_loss(out, grouping_matrix[:, 1 + i:2 + i, :]) * 10
+    k_l = torch.tensor(0).to(image.device)
+    gm_acc = torch.tensor(0).to(image.device)  # topk_accuracy(gm, grouping_matrix, pool_edge, k=5)
+    k_acc = torch.tensor(0).to(image.device)  # k_accuracy(k, instance_num)
+    return gm, k, gm_l, gm_acc, {'k_loss': k_l.detach().cpu(), 'gm_loss': gm_l.detach().cpu(),
+                                 "top5_acc": gm_acc.detach().cpu(),
+                                 'k_acc': k_acc.detach().cpu()}
+
+
+def val_forward(net: EdgeGroupingOnTransform, image, instance_masking, instance_edge, instance_num, edge, pool_edge,
+                grouping_matrix, nearby_matrix,
+                adjacent_matrix):
+    src = chunk_image(edge, 8)
+    src = src.reshape((pool_edge.shape[0], -1, 8 * 8))
+    # 添加开始占位符
+    src = torch.cat([torch.zeros(pool_edge.shape[0], 1, 64).to(src.device), src], dim=1)
+    memory = net.encode(src, None)
+
+    output = torch.zeros(pool_edge.shape[0], 1, 784, dtype=src.dtype, device=src.device)
     for i in range(784):
         out = net.decode(memory, None,
                          output,
@@ -66,14 +131,19 @@ def forward(net: EdgeGroupingOnTransform, image, instance_masking, instance_edge
         out = out[:, -1:, :]
         out = net.generator(out)
         output = torch.cat([output, out], dim=1)
-    gm = output[:, 1:, :].reshape(grouping_matrix.shape)
-    k = instance_num
+        print(f'val decode step {i + 1}/784', end='\r')
+    # 交换维度，将channel放在第二位
+    gm = output[:, 1:, :].permute(0, 2, 1).reshape(grouping_matrix.shape)
+    k = torch.zeros(instance_num.shape[0], 9, dtype=src.dtype, device=src.device)
+    for i, num in enumerate(instance_num):
+        k[i, num] = 1
     gm_l = mask_bce_loss(gm, grouping_matrix, pool_edge)
-    k_l = k_loss(k, instance_num)
+    k_l = torch.tensor(0.).to(image.device)
     gm_acc = topk_accuracy(gm, grouping_matrix, pool_edge, k=5)
     k_acc = k_accuracy(k, instance_num)
-    return gm, k, gm_l + k_l, gm_acc, {'k_loss': k_l.cpu(), 'gm_loss': gm_l.cpu(), "top5_acc": gm_acc.cpu(),
-                                       'k_acc': k_acc.cpu()}
+    return gm, k, gm_l, gm_acc, {'k_loss': k_l.detach().cpu(), 'gm_loss': gm_l.detach().cpu(),
+                                 "top5_acc": gm_acc.detach().cpu(),
+                                 'k_acc': k_acc.detach().cpu()}
 
 
 def loging(perfix, epoch, step, used_time, dataset_size, batch_size, tensorboard=True, **addentional):
@@ -134,14 +204,45 @@ for epoch in range(epochs):
     train = DataLoader(dataset, shuffle=True, num_workers=workernum, batch_size=batchSize)
     start_time = time.time()
     for index, batch in enumerate(train):
+
         image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, adjacent_matrix = to_device(
             device, *batch)
-        output, k, loss, acc, res = forward(net, image, instance_masking, instance_edge, instance_num, edge, pool_edge,
-                                            grouping_matrix, nearby_matrix, adjacent_matrix)
-        loss.backward()
+        # 3200图
+        if index > 400:
+            break
+
+        step_loss = torch.tensor(0.).cuda()
+        total_loss = torch.tensor(0.).cuda()
+        memory = train_forward_encode(net, image, instance_masking, instance_edge, instance_num, edge,
+                                      pool_edge,
+                                      grouping_matrix, nearby_matrix, adjacent_matrix)
+        mock_output = get_mock_output(grouping_matrix)
+        for i in range(784):
+            output, k, loss, acc, res = train_forward_decode(net, image, instance_masking, instance_edge, instance_num,
+                                                             edge,
+                                                             pool_edge,
+                                                             grouping_matrix, nearby_matrix, adjacent_matrix, i, memory,
+                                                             mock_output)
+            print(f'decode step {i}/784     gm_loss {loss}      k_loss {res["k_loss"]}', end='\r')
+            # loss.backward()
+            step_loss += loss
+            total_loss += loss.detach()
+
+            if i in backward_step:
+                step_loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                step_loss = torch.tensor(0.).cuda()
+                memory = train_forward_encode(net, image, instance_masking, instance_edge, instance_num, edge,
+                                              pool_edge,
+                                              grouping_matrix, nearby_matrix, adjacent_matrix)
+        total_loss /= 784
+        step_loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+
         used_time = time.time() - start_time
+        res["gm_loss"] = total_loss
         loging('train', epoch, step, used_time, dataset_size=len(train.dataset), batch_size=len(edge), **res)
         if index % 10 == 0:
             vision('train', step, image, instance_masking, instance_edge, instance_num, edge, pool_edge,
@@ -159,17 +260,20 @@ for epoch in range(epochs):
         (image, instance_masking, instance_edge, instance_num, edge,
          pool_edge, grouping_matrix, nearby_matrix, output, k, index) = [None] * 11
         for index, batch in enumerate(val):
+            # 测试集只保留前400张
+            if index > 50:
+                break
             image, instance_masking, instance_edge, instance_num, edge, pool_edge, grouping_matrix, nearby_matrix, adjacent_matrix = to_device(
                 device, *batch)
-            output, k, loss, acc, res = forward(net, image, instance_masking, instance_edge, instance_num, edge,
-                                                pool_edge,
-                                                grouping_matrix, nearby_matrix, adjacent_matrix)
+            output, k, loss, acc, res = val_forward(net, image, instance_masking, instance_edge, instance_num, edge,
+                                                    pool_edge,
+                                                    grouping_matrix, nearby_matrix, adjacent_matrix)
             for key, value in res.items():
                 total_res[key] = total_res.get(key, torch.zeros_like(value)) + value
 
             if index % 10 == 0:
                 loging('val_step', epoch, epoch * len(val.dataset) + index, used_time, dataset_size=len(train.dataset),
-                       batch_size=len(batch), **{k: v / index for k, v in total_res.items()})
+                       batch_size=len(batch), **{k: v / (index + 1) for k, v in total_res.items()})
                 vision('val_step', epoch * len(val.dataset) + index, image, instance_masking, instance_edge,
                        instance_num, edge,
                        pool_edge, grouping_matrix, output, k)

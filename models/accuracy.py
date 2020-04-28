@@ -1,6 +1,11 @@
 import torch
 
 
+def segments_accuracy(output: torch.Tensor, target: torch.Tensor):
+    output_keys = output.unique(sorted=True, counts=True)
+    target_keys = target.unique(sorted=True, counts=True)
+
+
 def topk_accuracy(output: torch.Tensor, target: torch.Tensor, pool_edge: torch.Tensor, k):
     # 检查每一个像素是否具有正确指向
     b, c, h, w = output.shape

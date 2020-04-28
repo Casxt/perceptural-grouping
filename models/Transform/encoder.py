@@ -1,7 +1,6 @@
 from torch import nn as nn
 
 from .layer_norm import LayerNorm
-from .sublayer_connection import SublayerConnection
 from .tool import clones
 
 
@@ -27,10 +26,17 @@ class EncoderLayer(nn.Module):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
-        self.sublayer = clones(SublayerConnection(size, dropout), 2)
         self.size = size
+        self.norm1 = LayerNorm(size)
+        self.dropout1 = nn.Dropout(dropout)
+        self.norm2 = LayerNorm(size)
+        self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x, mask):
         "Follow Figure 1 (left) for connections."
-        x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
-        return self.sublayer[1](x, self.feed_forward)
+        x = self.norm1(x)
+        x = self.self_attn(x, x, x, mask)
+        x = x + self.dropout1(x)
+        x = self.norm2(x)
+        x = self.feed_forward(x)
+        return x + self.dropout2(x)

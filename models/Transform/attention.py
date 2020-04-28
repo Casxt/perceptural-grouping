@@ -3,8 +3,8 @@ import math
 import torch
 from torch import nn
 
+
 # from . import clones
-from models.Transform.tool import clones
 
 
 def attention(query, key, value, mask=None, dropout=None):
@@ -27,7 +27,11 @@ class MultiHeadedAttention(nn.Module):
         # We assume d_v always equals d_k
         self.d_k = d_model // h
         self.h = h
-        self.linears = clones(nn.Linear(d_model, d_model), 4)
+        self.qw = nn.Linear(d_model, d_model)
+        self.kw = nn.Linear(d_model, d_model)
+        self.vw = nn.Linear(d_model, d_model)
+        self.ow = nn.Linear(d_model, d_model)
+        # self.linears = clones(nn.Linear(d_model, d_model), 4)
         self.attn = None
         self.dropout = nn.Dropout(p=dropout)
 
@@ -39,9 +43,15 @@ class MultiHeadedAttention(nn.Module):
         nbatches = query.size(0)
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
-        query, key, value = \
-            [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-             for l, x in zip(self.linears, (query, key, value))]
+        # query, key, value = \
+        #     [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+        #      for l, x in zip(self.linears, (query, key, value))]
+        # 按照reformer建议，qk共享权重矩阵
+        query, key, value = (
+            self.qw(query).view(nbatches, -1, self.h, self.d_k).transpose(1, 2),
+            self.qw(key).view(nbatches, -1, self.h, self.d_k).transpose(1, 2),
+            self.vw(value).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+        )
 
         # 2) Apply attention on all the projected vectors in batch.
         x, self.attn = attention(query, key, value, mask=mask,
@@ -50,4 +60,4 @@ class MultiHeadedAttention(nn.Module):
         # 3) "Concat" using a view and apply a final linear.
         x = x.transpose(1, 2).contiguous() \
             .view(nbatches, -1, self.h * self.d_k)
-        return self.linears[-1](x)
+        return self.ow(x)
