@@ -23,6 +23,7 @@ def run(model: EncoderDecoder, src, max_len):
 
 if __name__ == "__main__":
     # with torch.no_grad():
+    # inp[:, 0, 64]是全零的开始标志
     inp = torch.zeros(1, 785, 64, dtype=torch.float)
     model = make_image_model(input_channel=inp.size(2), output_channel=784, max_len=784 * 512)
     model.eval()
